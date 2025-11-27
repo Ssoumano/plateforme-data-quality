@@ -4,3 +4,5 @@ numpy
 matplotlib
 seaborn
 openai
+json
+textwrap
