@@ -238,3 +238,4 @@ elif page == "Contact":
     st.write("**Téléphone :** +33 6 64 67 88 87")
     st.write("**LinkedIn :** https://linkedin.com/in/seydou-soumano")
     st.write("**Github :** https://github.com/Ssoumano")
+
