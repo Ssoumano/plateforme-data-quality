@@ -75,34 +75,79 @@ def profile_data_quality(df: pd.DataFrame) -> dict:
 
     return profil
 
-def openai_suggest_tests(df):
-    schema_description = ""
 
+# -------------------------
+# Synthèse automatique PRO
+# -------------------------
+def generate_synthese(profil):
+    missing = profil["missing_pct"].mean()
+    duplicates = profil["duplicate_rows"]
+    outliers_total = sum(profil["outliers"].values())
+
+    synthese = f"""
+### 🧾 Synthèse générale de la qualité des données
+
+- Le dataset contient **{profil['rows']} lignes** et **{profil['cols']} colonnes**.
+- Le taux moyen de valeurs manquantes est de **{missing:.2f}%**.
+- Nombre total de doublons détectés : **{duplicates}**.
+- Nombre total d'outliers dans les colonnes numériques : **{outliers_total}**.
+- Score global calculé : **{profil['global_score']}%**.
+
+"""
+
+    # Priorités
+    prio = "### 🎯 Priorités recommandées\n"
+
+    if missing > 20:
+        prio += "- 🔴 **Haute priorité : réduire les valeurs manquantes (>20%)**\n"
+    elif missing > 5:
+        prio += "- 🟠 **Priorité moyenne : valeurs manquantes modérées (>5%)**\n"
+    else:
+        prio += "- 🟢 **Faible priorité : peu de valeurs manquantes**\n"
+
+    if duplicates > 0:
+        prio += "- 🔴 **Supprimer les doublons détectés**\n"
+    else:
+        prio += "- 🟢 Aucun doublon détecté\n"
+
+    if outliers_total > 20:
+        prio += "- 🟠 **Analyser les colonnes contenant beaucoup d'outliers**\n"
+    else:
+        prio += "- 🟢 Outliers limités\n"
+
+    return synthese + "\n" + prio
+
+
+# -------------------------
+# OpenAI : Tests complémentaires + Explications PRO
+# -------------------------
+def openai_suggest_tests(df):
+    schema = ""
     for col in df.columns:
-        schema_description += f"- {col}: {str(df[col].head().tolist())[:80]}...\n"
+        schema += f"- {col}: {str(df[col].head().tolist())[:80]}...\n"
 
     prompt = f"""
-    Analyse le schéma ci-dessous et propose des tests de data quality
-    supplémentaires adaptés aux colonnes.
+    Analyse le schéma et génère :
 
-    SCHÉMA DES DONNÉES :
-    {schema_description}
+    1. Une liste de tests de data quality avancés adaptés au dataset
+    2. Une explication simple de chaque test
+    3. Les risques associés si le test échoue
+    4. Les recommandations de correction
 
-    Fournis une liste claire d'au moins 5 tests pertinents.
+    SCHÉMA :
+    {schema}
     """
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "Tu es un expert en data quality."},
-                {"role": "user", "content": prompt}
-            ]
-        )
-        return response.choices[0].message.content
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Expert data quality senior."},
+            {"role": "user", "content": prompt}
+        ]
+    )
 
-    except Exception as e:
-        return f"Erreur OpenAI : {e}"
+    return response.choices[0].message.content
+
 
 # -------------------------
 # Interface Streamlit
@@ -115,7 +160,6 @@ page = st.sidebar.radio("Aller à", [
     "Contact"
 ])
 
-# Style icône (i)
 info_style = """
     <span style='color:#888; font-size:14px; cursor:pointer; margin-left:4px;' title='{txt}'>ℹ️</span>
 """
@@ -124,7 +168,7 @@ info_style = """
 # PAGE : DATA QUALITY
 # ============================
 if page == "Testez la qualité de vos données":
-    st.title("📊 Dashboard de Qualité des Données")
+    st.title("📊 Dashboard professionnel de Qualité des Données")
 
     uploaded_file = st.file_uploader("📥 Importer un fichier", type=["csv", "xlsx", "xls"])
 
@@ -135,35 +179,21 @@ if page == "Testez la qualité de vos données":
             profil = profile_data_quality(df)
 
             # ============================
-            # KPI CARDS + (i)
+            # KPI CARDS
             # ============================
             st.markdown("## ⭐ Indicateurs clés")
 
             col1, col2, col3, col4 = st.columns(4)
 
-            col1.markdown(
-                f"<b>Score global</b>{info_style.format(txt='Score basé sur NA (50%), doublons (30%) et outliers (20%).')}",
-                unsafe_allow_html=True
-            )
-            col1.metric("", f"{profil['global_score']}%")
+            col1.metric("Score global", f"{profil['global_score']}%")
+            col2.metric("Valeurs manquantes", int(profil["missing_count"].sum()))
+            col3.metric("Doublons", profil["duplicate_rows"])
+            col4.metric("Colonnes vides/constantes", len(profil["empty_columns"]) + len(profil["constant_columns"]))
 
-            col2.markdown(
-                f"<b>Valeurs manquantes</b>{info_style.format(txt='Nombre total de valeurs manquantes détectées.')}",
-                unsafe_allow_html=True
-            )
-            col2.metric("", int(profil["missing_count"].sum()))
-
-            col3.markdown(
-                f"<b>Doublons</b>{info_style.format(txt='Nombre de lignes complètement dupliquées.')}",
-                unsafe_allow_html=True
-            )
-            col3.metric("", profil["duplicate_rows"])
-
-            col4.markdown(
-                f"<b>Colonnes vides/constantes</b>{info_style.format(txt='Colonnes sans données ou avec une seule valeur.')}",
-                unsafe_allow_html=True
-            )
-            col4.metric("", len(profil["empty_columns"]) + len(profil["constant_columns"]))
+            # ============================
+            # Synthèse pro
+            # ============================
+            st.markdown(generate_synthese(profil))
 
             # ============================
             # Aperçu DataFrame
@@ -172,9 +202,9 @@ if page == "Testez la qualité de vos données":
             st.dataframe(df.head(300))
 
             # ============================
-            # HEATMAP OUTLIERS (VERSION PRO)
+            # Heatmap Outliers (PRO)
             # ============================
-            st.subheader("⚠️ Heatmap – Nombre d’outliers (IQR)")
+            st.subheader("⚠️ Heatmap – Outliers détectés")
 
             outliers_df = (
                 pd.DataFrame(profil["outliers"], index=["outliers"]).T
@@ -187,18 +217,12 @@ if page == "Testez la qualité de vos données":
                 outliers_df,
                 annot=True,
                 fmt="d",
-                cmap=sns.color_palette("Reds", as_cmap=True),
+                cmap="Reds",
                 linewidths=.5,
                 linecolor="white",
                 cbar_kws={"label": "Niveau d’anomalies"},
                 ax=ax
             )
-
-            ax.set_xlabel("")
-            ax.set_ylabel("")
-            ax.set_title("Outliers détectés par colonne (Méthode IQR)", fontsize=14, pad=12)
-            ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=11)
-
             st.pyplot(fig)
 
             # ============================
@@ -208,13 +232,14 @@ if page == "Testez la qualité de vos données":
             st.dataframe(profil["numeric_stats"])
 
             # ============================
-            # Suggestions OpenAI
+            # OPENAI : Tests complémentaires pro
             # ============================
-            st.subheader("🤖 Suggestions de tests complémentaires (OpenAI)")
+            st.subheader("🤖 Tests de data quality avancés (OpenAI)")
             st.write(openai_suggest_tests(df))
 
+
 # ============================
-# PAGE CONTACT
+# CONTACT
 # ============================
 elif page == "Contact":
     st.title("Contact")
@@ -223,4 +248,3 @@ elif page == "Contact":
     st.write("**Téléphone :** +33 6 64 67 88 87")
     st.write("**LinkedIn :** https://linkedin.com/in/seydou-soumano")
     st.write("**Github :** https://github.com/Ssoumano")
-
