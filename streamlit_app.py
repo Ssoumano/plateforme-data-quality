@@ -9,7 +9,7 @@ from openai import OpenAI
 # -------------------------
 # Configuration OpenAI
 # -------------------------
-OPENAI_API_KEY = "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"
+OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
 client = OpenAI(api_key=OPENAI_API_KEY)
 
 # -------------------------
@@ -223,3 +223,4 @@ elif page == "Contact":
     st.write("**Téléphone :** +33 6 64 67 88 87")
     st.write("**LinkedIn :** https://linkedin.com/in/seydou-soumano")
     st.write("**Github :** https://github.com/Ssoumano")
+
