@@ -3,6 +3,4 @@ pandas
 numpy
 matplotlib
 seaborn
-openai
-json
-textwrap
+openai>=1.2.0
