@@ -131,7 +131,7 @@ def openai_generate_synthesis(df, profil):
             {"role": "system", "content": "Tu es un consultant senior expert en qualité des données."},
             {"role": "user", "content": prompt}
         ],
-        max_tokens=900,
+        max_tokens=2500,
         temperature=0.2
     )
 
@@ -154,7 +154,7 @@ def openai_suggest_tests(df):
             {"role": "system", "content": "Expert en data quality."},
             {"role": "user", "content": prompt}
         ],
-        max_tokens=600,
+        max_tokens=1500,
         temperature=0.2
     )
 
@@ -399,3 +399,4 @@ elif page == "Contact":
     st.write("**Téléphone :** +33 6 64 67 88 87")
     st.write("**LinkedIn :** https://linkedin.com/in/seydou-soumano")
     st.write("**GitHub :** https://github.com/Ssoumano")
+
