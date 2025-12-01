@@ -259,7 +259,7 @@ page = st.sidebar.radio("Aller à", ["Testez la qualité de vos données", "Cont
 if page == "Testez la qualité de vos données":
 
     st.markdown(POWERBI_CSS, unsafe_allow_html=True)
-    st.title("📊 Data Quality Dashboard (Power BI Style)")
+    st.title("📊 Data Quality Dashboard ")
 
     if OPENAI_API_KEY is None:
         st.warning("⚠️ OpenAI non configuré. Ajoute OPENAI_API_KEY dans les secrets Streamlit.")
@@ -399,4 +399,5 @@ elif page == "Contact":
     st.write("**Téléphone :** +33 6 64 67 88 87")
     st.write("**LinkedIn :** https://linkedin.com/in/seydou-soumano")
     st.write("**GitHub :** https://github.com/Ssoumano")
+
 
