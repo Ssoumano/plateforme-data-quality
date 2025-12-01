@@ -320,7 +320,7 @@ if page == "Testez la qualité de vos données":
                         unsafe_allow_html=True)
 
             st.markdown("---")
-            st.subheader("👀 Aperçu du DataFrame")
+            st.subheader(" Aperçu du DataFrame")
             st.dataframe(df.head(300))
 
             # Heatmap outliers (styled)
@@ -336,7 +336,7 @@ if page == "Testez la qualité de vos données":
             st.pyplot(fig1)
 
             st.markdown("---")
-            st.subheader(" Synthèse détaillée & Priorités")
+            st.subheader(" Rapport global ")
             with st.spinner("Génération ..."):
                 synthesis = openai_generate_synthesis(df, profil)
             st.markdown(synthesis)
@@ -372,4 +372,5 @@ elif page == "Contact":
     st.write("**Téléphone :** +33 6 64 67 88 87")
     st.write("**LinkedIn :** https://linkedin.com/in/seydou-soumano")
     st.write("**GitHub :** https://github.com/Ssoumano")
+
 
