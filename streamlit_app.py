@@ -16,9 +16,8 @@ from reportlab.lib.units import cm
 from PIL import Image
 import base64
 
-# -------------------------
-# CONFIG OPENAI (via secrets recommended)
-# -------------------------
+# CONFIG API OPENAI (via secrets )
+
 if "OPENAI_API_KEY" in st.secrets:
     OPENAI_API_KEY = st.secrets["OPENAI_API_KEY"]
     client = OpenAI(api_key=OPENAI_API_KEY)
@@ -26,9 +25,9 @@ else:
     OPENAI_API_KEY = None
     client = None
 
-# -------------------------
-# Utility: separator detection & load
-# -------------------------
+
+# Import: separator detection & load
+
 def detect_separator(uploaded_file_bytes: bytes) -> str:
     sample = uploaded_file_bytes[:4096].decode(errors='ignore')
     for sep in [';', ',', '\t', '|']:
@@ -49,9 +48,9 @@ def load_dataframe(uploaded_file):
     else:
         return pd.read_csv(io.BytesIO(data), encoding='utf-8')
 
-# -------------------------
-# Profiling functions
-# -------------------------
+
+# Data Profiling 
+
 def profile_data_quality(df: pd.DataFrame) -> dict:
     profil = {}
     profil['rows'] = int(df.shape[0])
@@ -86,9 +85,9 @@ def profile_data_quality(df: pd.DataFrame) -> dict:
 
     return profil
 
-# -------------------------
-# OpenAI helpers (if configured)
-# -------------------------
+
+# Rpport OpenAI 
+
 def openai_generate_synthesis(df, profil):
     if client is None:
         return "OpenAI non configuré. Ajoute OPENAI_API_KEY dans les secrets Streamlit."
@@ -136,9 +135,9 @@ def openai_suggest_tests(df):
     )
     return resp.choices[0].message.content
 
-# -------------------------
+
 # PDF generation (ReportLab)
-# -------------------------
+
 def fig_to_bytes(fig):
     buf = io.BytesIO()
     fig.savefig(buf, format="png", bbox_inches='tight', dpi=150)
@@ -227,9 +226,9 @@ def build_pdf(report_text, profil, df, figs_bytes_list):
     buf.seek(0)
     return buf
 
-# -------------------------
+
 # Styling Power BI (partial)
-# -------------------------
+
 POWERBI_CSS = """
 <style>
 /* background */
@@ -249,15 +248,14 @@ div.block-container { padding-top: 18px; padding-left:18px; padding-right:18px; 
 
 st.set_page_config(page_title="Data Quality App", layout="wide")
 
-# -------------------------
+
 # Sidebar
-# -------------------------
+
 st.sidebar.title("Navigation")
 page = st.sidebar.radio("Aller à", ["Testez la qualité de vos données", "Contact"])
 
-# -------------------------
 # Page: Data Quality
-# -------------------------
+
 if page == "Testez la qualité de vos données":
     st.markdown(POWERBI_CSS, unsafe_allow_html=True)
     st.title("📊 Data Quality Dashboard (Power BI style tiles)")
@@ -326,7 +324,7 @@ if page == "Testez la qualité de vos données":
             st.dataframe(df.head(300))
 
             # Heatmap outliers (styled)
-            st.subheader("🔥 Heatmap – Outliers (IQR)")
+            st.subheader(" Heatmap – Outliers (IQR)")
             outlier_df = pd.DataFrame(profil['outliers'].values(), index=profil['outliers'].keys(), columns=["outliers"])
             outlier_df = outlier_df.sort_values("outliers", ascending=False)
             fig1, ax1 = plt.subplots(figsize=(8, max(2, len(outlier_df)*0.35)))
@@ -338,12 +336,12 @@ if page == "Testez la qualité de vos données":
             st.pyplot(fig1)
 
             st.markdown("---")
-            st.subheader("🧠 Synthèse détaillée & Priorités (OpenAI)")
-            with st.spinner("Génération OpenAI..."):
+            st.subheader(" Synthèse détaillée & Priorités")
+            with st.spinner("Génération ..."):
                 synthesis = openai_generate_synthesis(df, profil)
             st.markdown(synthesis)
 
-            st.markdown("## 🧪 Tests complémentaires (OpenAI)")
+            st.markdown("## Tests complémentaires")
             tests = openai_suggest_tests(df)
             st.write(tests)
 
@@ -374,3 +372,4 @@ elif page == "Contact":
     st.write("**Téléphone :** +33 6 64 67 88 87")
     st.write("**LinkedIn :** https://linkedin.com/in/seydou-soumano")
     st.write("**GitHub :** https://github.com/Ssoumano")
+
