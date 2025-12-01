@@ -4,3 +4,5 @@ numpy
 matplotlib
 seaborn
 openai>=1.2.0
+reportlab
+pillow
