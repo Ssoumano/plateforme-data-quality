@@ -363,7 +363,7 @@ if page == "Testez la qualité de vos données":
             # Synthèse OpenAI
             # ----------------------------------------------------
             st.markdown("---")
-            st.subheader("🧠 Synthèse globale (OpenAI)")
+            st.subheader("🧠 Synthèse globale")
 
             with st.spinner("Analyse en cours..."):
                 synthesis = openai_generate_synthesis(df, profil)
@@ -399,5 +399,6 @@ elif page == "Contact":
     st.write("**Téléphone :** +33 6 64 67 88 87")
     st.write("**LinkedIn :** https://linkedin.com/in/seydou-soumano")
     st.write("**GitHub :** https://github.com/Ssoumano")
+
 
 
