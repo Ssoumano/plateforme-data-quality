@@ -18,14 +18,38 @@ import base64
 
 
 # ----------------------------------------------------
-# 🔧 FIX : Nettoyage du texte OpenAI
+# 🔧 FIX : Nettoyage du texte OpenAI et HTML
 # ----------------------------------------------------
 def clean_ai_text(text: str) -> str:
+    """Nettoie le texte OpenAI et échappe les caractères HTML"""
     text = text.replace("`", "")
     text = text.replace("* *", " ")
     text = text.replace("** **", " ")
     text = text.replace("• •", "• ")
     text = text.replace("\u200b", "")  # caractères invisibles
+    return text
+
+
+def escape_for_reportlab(text: str) -> str:
+    """Échappe le texte pour ReportLab en enlevant les balises HTML problématiques"""
+    import re
+    
+    # Remplacer ** par du gras proper
+    text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
+    
+    # Échapper les caractères spéciaux HTML
+    text = text.replace('&', '&amp;')
+    text = text.replace('<', '&lt;').replace('>', '&gt;')
+    
+    # Restaurer les balises que nous voulons garder
+    text = text.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
+    text = text.replace('&lt;i&gt;', '<i>').replace('&lt;/i&gt;', '</i>')
+    text = text.replace('&lt;br/&gt;', '<br/>')
+    
+    # Nettoyer les balises mal formées
+    text = re.sub(r'<b>\s*</b>', '', text)
+    text = re.sub(r'<i>\s*</i>', '', text)
+    
     return text
 
 
@@ -527,7 +551,9 @@ def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
         section_content = "\n".join(lines[1:]).strip()
         
         if section_title:
-            story.append(Paragraph(section_title, styles['Heading2']))
+            # Nettoyer le titre
+            clean_title = escape_for_reportlab(section_title)
+            story.append(Paragraph(clean_title, styles['Heading2']))
             story.append(Spacer(1, 0.3*cm))
         
         # Si c'est un tableau markdown
@@ -540,7 +566,9 @@ def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
                 for line in table_lines:
                     cells = [cell.strip() for cell in line.split("|")[1:-1]]
                     if "---" not in line:
-                        table_data.append(cells)
+                        # Nettoyer chaque cellule
+                        clean_cells = [escape_for_reportlab(cell) for cell in cells]
+                        table_data.append(clean_cells)
                 
                 # Créer le tableau PDF avec couleurs
                 if table_data:
@@ -574,13 +602,27 @@ def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
             # Texte normal
             paragraphs = section_content.split("\n\n")
             for para in paragraphs:
-                if para.strip():
+                para = para.strip()
+                if not para:
+                    continue
+                
+                try:
+                    # Nettoyer le paragraphe
+                    clean_para = escape_for_reportlab(para)
+                    
                     # Gérer les listes numérotées
-                    if para.strip()[0].isdigit() and ". " in para[:5]:
-                        para = para.replace("**", "<b>").replace("**", "</b>")
-                        story.append(Paragraph(para, styles['Normal']))
+                    if len(clean_para) > 0 and clean_para[0].isdigit() and ". " in clean_para[:5]:
+                        story.append(Paragraph(clean_para, styles['Normal']))
                     else:
-                        story.append(Paragraph(para, styles['BodyText']))
+                        story.append(Paragraph(clean_para, styles['BodyText']))
+                    
+                    story.append(Spacer(1, 0.2*cm))
+                except Exception as e:
+                    # Si le paragraphe pose problème, l'écrire en texte brut
+                    print(f"Erreur avec paragraphe: {para[:100]}... - {str(e)}")
+                    # Créer un paragraphe simple sans formatage
+                    simple_text = para.replace('<', '').replace('>', '').replace('&', '')
+                    story.append(Paragraph(simple_text, styles['Normal']))
                     story.append(Spacer(1, 0.2*cm))
         
         story.append(Spacer(1, 0.3*cm))
