@@ -291,7 +291,7 @@ def openai_suggest_tests(df, profil, col_types):
 
 
 # ----------------------------------------------------
-# PDF Generation
+# PDF Generation - Version Professionnelle
 # ----------------------------------------------------
 def fig_to_bytes(fig):
     buf = io.BytesIO()
@@ -301,57 +301,349 @@ def fig_to_bytes(fig):
     return buf
 
 
-def build_pdf(report_text, profil, df, figs_bytes_list):
+def create_gauge_chart(score):
+    """Crée un gauge chart pour le score global"""
+    fig, ax = plt.subplots(figsize=(6, 3))
+    
+    # Couleurs selon le score
+    if score >= 80:
+        color = '#4CAF50'  # Vert
+    elif score >= 60:
+        color = '#FFC107'  # Orange
+    else:
+        color = '#F44336'  # Rouge
+    
+    # Créer le gauge
+    from matplotlib.patches import Wedge
+    wedge = Wedge((0.5, 0), 0.4, 0, 180, width=0.15, facecolor=color, edgecolor='white', linewidth=2)
+    ax.add_patch(wedge)
+    
+    # Fond gris
+    wedge_bg = Wedge((0.5, 0), 0.4, 0, 180, width=0.15, facecolor='#E0E0E0', edgecolor='white', linewidth=2)
+    ax.add_patch(wedge_bg)
+    
+    # Indicateur de score
+    angle = score * 1.8  # 0-180 degrés
+    wedge_score = Wedge((0.5, 0), 0.4, 0, angle, width=0.15, facecolor=color, edgecolor='white', linewidth=2)
+    ax.add_patch(wedge_score)
+    
+    # Texte du score
+    ax.text(0.5, 0.15, f"{score}%", ha='center', va='center', fontsize=32, fontweight='bold', color=color)
+    ax.text(0.5, -0.05, "Score Global", ha='center', va='center', fontsize=12, color='#666')
+    
+    ax.set_xlim(0, 1)
+    ax.set_ylim(-0.1, 0.5)
+    ax.axis('off')
+    
+    return fig
+
+
+def create_missing_chart(profil):
+    """Graphique des valeurs manquantes par colonne"""
+    missing_data = pd.Series(profil['missing_pct']).sort_values(ascending=False).head(10)
+    
+    if missing_data.empty or missing_data.sum() == 0:
+        return None
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    colors_list = ['#F44336' if x > 50 else '#FFC107' if x > 20 else '#4CAF50' for x in missing_data.values]
+    
+    missing_data.plot(kind='barh', ax=ax, color=colors_list, edgecolor='white', linewidth=1.5)
+    ax.set_xlabel("Pourcentage de valeurs manquantes (%)", fontsize=11)
+    ax.set_ylabel("")
+    ax.set_title("Top 10 des colonnes avec valeurs manquantes", fontsize=13, fontweight='bold', pad=15)
+    ax.grid(axis='x', alpha=0.3, linestyle='--')
+    
+    # Ajouter les valeurs sur les barres
+    for i, v in enumerate(missing_data.values):
+        ax.text(v + 1, i, f"{v:.1f}%", va='center', fontsize=9)
+    
+    plt.tight_layout()
+    return fig
+
+
+def create_types_chart(col_types):
+    """Graphique des types de colonnes"""
+    type_counts = pd.Series(col_types).value_counts()
+    
+    fig, ax = plt.subplots(figsize=(8, 6))
+    colors_pie = ['#2196F3', '#4CAF50', '#FFC107', '#F44336', '#9C27B0', '#00BCD4']
+    
+    wedges, texts, autotexts = ax.pie(
+        type_counts.values, 
+        labels=type_counts.index, 
+        autopct='%1.1f%%',
+        colors=colors_pie[:len(type_counts)],
+        startangle=90,
+        textprops={'fontsize': 11}
+    )
+    
+    for autotext in autotexts:
+        autotext.set_color('white')
+        autotext.set_fontweight('bold')
+    
+    ax.set_title("Distribution des types de colonnes", fontsize=13, fontweight='bold', pad=15)
+    plt.tight_layout()
+    return fig
+
+
+def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
+    """Génère un PDF professionnel avec design moderne"""
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
+    from reportlab.platypus import PageBreak, KeepTogether
+    
     buf = io.BytesIO()
-    doc = SimpleDocTemplate(buf, pagesize=A4, rightMargin=2*cm, leftMargin=2*cm, topMargin=2*cm, bottomMargin=2*cm)
+    doc = SimpleDocTemplate(
+        buf, 
+        pagesize=A4, 
+        rightMargin=2*cm, 
+        leftMargin=2*cm, 
+        topMargin=2.5*cm, 
+        bottomMargin=2.5*cm
+    )
+    
     styles = getSampleStyleSheet()
     story = []
-
-    # Title
-    story.append(Paragraph("Rapport Data Quality", styles["Title"]))
-    story.append(Spacer(1, 12))
-
-    # Metadata table
-    meta = [
-        ["Lignes", profil['rows']],
-        ["Colonnes", profil['cols']],
-        ["Score global", f"{profil['global_score']}%"],
-        ["Valeurs manquantes (total)", int(sum(profil['missing_count'].values()))],
-        ["Doublons", profil['duplicate_rows']],
+    
+    # ============================================
+    # PAGE DE GARDE
+    # ============================================
+    title_style = ParagraphStyle(
+        'CustomTitle',
+        parent=styles['Heading1'],
+        fontSize=32,
+        textColor=colors.HexColor('#1976D2'),
+        spaceAfter=30,
+        alignment=TA_CENTER,
+        fontName='Helvetica-Bold'
+    )
+    
+    subtitle_style = ParagraphStyle(
+        'Subtitle',
+        parent=styles['Normal'],
+        fontSize=16,
+        textColor=colors.HexColor('#666666'),
+        spaceAfter=50,
+        alignment=TA_CENTER
+    )
+    
+    story.append(Spacer(1, 5*cm))
+    story.append(Paragraph("Rapport d'Audit", title_style))
+    story.append(Paragraph("Data Quality", title_style))
+    story.append(Spacer(1, 1*cm))
+    story.append(Paragraph(f"Généré le {pd.Timestamp.now().strftime('%d/%m/%Y à %H:%M')}", subtitle_style))
+    
+    # Métadonnées en encadré
+    meta_data = [
+        ['', ''],
+        ['📊 Dataset', f"{profil['rows']:,} lignes × {profil['cols']} colonnes"],
+        ['✓ Score Global', f"{profil['global_score']}%"],
+        ['⚠ Valeurs Manquantes', f"{sum(profil['missing_count'].values()):,}"],
+        ['🔄 Doublons', f"{profil['duplicate_rows']:,}"],
+        ['', '']
     ]
-    t = Table(meta, hAlign='LEFT')
-    t.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (0,-1), colors.lightgrey),
-        ('GRID', (0,0), (-1,-1), 0.3, colors.grey)
+    
+    meta_table = Table(meta_data, colWidths=[5*cm, 10*cm])
+    meta_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,1), (-1,-2), colors.HexColor('#F5F5F5')),
+        ('TEXTCOLOR', (0,1), (-1,-2), colors.black),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('FONTNAME', (0,1), (0,-2), 'Helvetica-Bold'),
+        ('FONTNAME', (1,1), (1,-2), 'Helvetica'),
+        ('FONTSIZE', (0,1), (-1,-2), 12),
+        ('GRID', (0,1), (-1,-2), 1, colors.HexColor('#DDDDDD')),
+        ('ROWBACKGROUNDS', (0,1), (-1,-2), [colors.white, colors.HexColor('#FAFAFA')]),
+        ('TOPPADDING', (0,1), (-1,-2), 12),
+        ('BOTTOMPADDING', (0,1), (-1,-2), 12),
     ]))
-    story.append(t)
-    story.append(Spacer(1, 12))
-
-    # Synthèse AI
-    story.append(Paragraph("Synthèse", styles["Heading2"]))
-    for para in report_text.split("\n\n"):
-        story.append(Paragraph(para.replace("\n", "<br/>"), styles["BodyText"]))
-        story.append(Spacer(1, 6))
-
+    
+    story.append(meta_table)
     story.append(PageBreak())
-
-    # Figures
+    
+    # ============================================
+    # RÉSUMÉ EXÉCUTIF
+    # ============================================
+    story.append(Paragraph("Résumé Exécutif", styles['Heading1']))
+    story.append(Spacer(1, 0.3*cm))
+    
+    # Score visuel avec gauge
+    gauge_fig = create_gauge_chart(profil['global_score'])
+    gauge_bytes = fig_to_bytes(gauge_fig)
+    gauge_img = Image.open(gauge_bytes)
+    
+    gauge_buf = io.BytesIO()
+    gauge_img.save(gauge_buf, format="PNG")
+    gauge_buf.seek(0)
+    
+    story.append(RLImage(gauge_buf, width=12*cm, height=6*cm))
+    story.append(Spacer(1, 0.5*cm))
+    
+    # Indicateurs clés
+    kpi_data = [
+        ['Indicateur', 'Valeur', 'État'],
+        ['Complétude', f"{100 - pd.Series(profil['missing_pct']).mean():.1f}%", 
+         '✓' if pd.Series(profil['missing_pct']).mean() < 10 else '⚠'],
+        ['Unicité', f"{100 - (profil['duplicate_rows']/profil['rows']*100):.1f}%",
+         '✓' if profil['duplicate_rows'] == 0 else '✗'],
+        ['Outliers', f"{sum(profil['outliers'].values())} détectés",
+         '✓' if sum(profil['outliers'].values()) < 50 else '⚠'],
+        ['Colonnes constantes', f"{len(profil['constant_columns'])}",
+         '✓' if len(profil['constant_columns']) == 0 else '⚠']
+    ]
+    
+    kpi_table = Table(kpi_data, colWidths=[6*cm, 5*cm, 3*cm])
+    kpi_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1976D2')),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+        ('ALIGN', (0,0), (-1,-1), 'CENTER'),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,0), 12),
+        ('BACKGROUND', (0,1), (-1,-1), colors.beige),
+        ('GRID', (0,0), (-1,-1), 1, colors.grey),
+        ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F9F9F9')]),
+        ('TOPPADDING', (0,0), (-1,-1), 10),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 10),
+    ]))
+    
+    story.append(kpi_table)
+    story.append(PageBreak())
+    
+    # ============================================
+    # SYNTHÈSE DÉTAILLÉE
+    # ============================================
+    story.append(Paragraph("Analyse Détaillée", styles['Heading1']))
+    story.append(Spacer(1, 0.5*cm))
+    
+    # Parser le texte de synthèse
+    sections = report_text.split("###")
+    
+    for section in sections:
+        if not section.strip():
+            continue
+        
+        lines = section.strip().split("\n")
+        section_title = lines[0].strip()
+        section_content = "\n".join(lines[1:]).strip()
+        
+        if section_title:
+            story.append(Paragraph(section_title, styles['Heading2']))
+            story.append(Spacer(1, 0.3*cm))
+        
+        # Si c'est un tableau markdown
+        if "|" in section_content and "---" in section_content:
+            table_lines = [line for line in section_content.split("\n") if line.strip().startswith("|")]
+            
+            if len(table_lines) > 2:
+                # Parser le tableau
+                table_data = []
+                for line in table_lines:
+                    cells = [cell.strip() for cell in line.split("|")[1:-1]]
+                    if "---" not in line:
+                        table_data.append(cells)
+                
+                # Créer le tableau PDF avec couleurs
+                if table_data:
+                    pdf_table = Table(table_data, colWidths=[2.5*cm, 4*cm, 3.5*cm, 3*cm, 4*cm])
+                    
+                    # Style avec couleurs selon priorité
+                    table_style = [
+                        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1976D2')),
+                        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+                        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+                        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+                        ('FONTSIZE', (0,0), (-1,-1), 9),
+                        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+                        ('TOPPADDING', (0,0), (-1,-1), 8),
+                        ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+                        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+                    ]
+                    
+                    # Colorer selon priorité
+                    for i, row in enumerate(table_data[1:], start=1):
+                        if 'Élevée' in row[0] or 'Haute' in row[0]:
+                            table_style.append(('BACKGROUND', (0,i), (0,i), colors.HexColor('#FFCDD2')))
+                        elif 'Moyenne' in row[0]:
+                            table_style.append(('BACKGROUND', (0,i), (0,i), colors.HexColor('#FFF9C4')))
+                        elif 'Faible' in row[0] or 'Basse' in row[0]:
+                            table_style.append(('BACKGROUND', (0,i), (0,i), colors.HexColor('#C8E6C9')))
+                    
+                    pdf_table.setStyle(TableStyle(table_style))
+                    story.append(pdf_table)
+        else:
+            # Texte normal
+            paragraphs = section_content.split("\n\n")
+            for para in paragraphs:
+                if para.strip():
+                    # Gérer les listes numérotées
+                    if para.strip()[0].isdigit() and ". " in para[:5]:
+                        para = para.replace("**", "<b>").replace("**", "</b>")
+                        story.append(Paragraph(para, styles['Normal']))
+                    else:
+                        story.append(Paragraph(para, styles['BodyText']))
+                    story.append(Spacer(1, 0.2*cm))
+        
+        story.append(Spacer(1, 0.3*cm))
+    
+    story.append(PageBreak())
+    
+    # ============================================
+    # VISUALISATIONS
+    # ============================================
+    story.append(Paragraph("Visualisations", styles['Heading1']))
+    story.append(Spacer(1, 0.5*cm))
+    
+    # Graphique des valeurs manquantes
+    missing_fig = create_missing_chart(profil)
+    if missing_fig:
+        story.append(Paragraph("Colonnes avec valeurs manquantes", styles['Heading2']))
+        missing_bytes = fig_to_bytes(missing_fig)
+        missing_img = Image.open(missing_bytes)
+        
+        max_w = A4[0] - 4*cm
+        ratio = max_w / missing_img.size[0]
+        
+        missing_buf = io.BytesIO()
+        missing_img.save(missing_buf, format="PNG")
+        missing_buf.seek(0)
+        
+        story.append(RLImage(missing_buf, width=max_w, height=missing_img.size[1]*ratio))
+        story.append(Spacer(1, 1*cm))
+    
+    # Graphique des types
+    types_fig = create_types_chart(col_types)
+    story.append(Paragraph("Types de colonnes détectés", styles['Heading2']))
+    types_bytes = fig_to_bytes(types_fig)
+    types_img = Image.open(types_bytes)
+    
+    max_w = A4[0] - 4*cm
+    ratio = max_w / types_img.size[0]
+    
+    types_buf = io.BytesIO()
+    types_img.save(types_buf, format="PNG")
+    types_buf.seek(0)
+    
+    story.append(RLImage(types_buf, width=max_w, height=types_img.size[1]*ratio))
+    story.append(Spacer(1, 1*cm))
+    
+    # Autres figures (heatmap outliers, etc.)
     for idx, figb in enumerate(figs_bytes_list):
-        story.append(Paragraph(f"Figure {idx+1}", styles["Heading2"]))
+        story.append(Paragraph(f"Heatmap des outliers", styles['Heading2']))
         img = Image.open(figb)
-
+        
         max_w = A4[0] - 4*cm
         ratio = max_w / img.size[0]
         new_w = max_w
         new_h = img.size[1] * ratio
-
+        
         img_buf = io.BytesIO()
         img.save(img_buf, format="PNG")
         img_buf.seek(0)
-
+        
         story.append(RLImage(img_buf, width=new_w, height=new_h))
-        story.append(Spacer(1, 12))
-
+        story.append(Spacer(1, 0.5*cm))
+    
+    # Build PDF
     doc.build(story)
     buf.seek(0)
     return buf
@@ -773,11 +1065,24 @@ df['{col}'] = df['{col}'].clip(lower=q1, upper=q99)
             
             fig_bytes = [fig_to_bytes(fig1)]
 
-            pdf_buffer = build_pdf(synthesis, profil, df, fig_bytes)
+            with st.spinner("Génération du rapport PDF professionnel..."):
+                pdf_buffer = build_pdf(synthesis, profil, df, col_types, fig_bytes)
 
             b64 = base64.b64encode(pdf_buffer.getvalue()).decode()
-            href = f'<a href="data:application/octet-stream;base64,{b64}" download="data_quality_report.pdf">📄 Télécharger le rapport PDF</a>'
-            st.markdown(href, unsafe_allow_html=True)
+            
+            col_pdf1, col_pdf2 = st.columns([1, 2])
+            
+            with col_pdf1:
+                st.download_button(
+                    label="📄 Télécharger le rapport PDF",
+                    data=pdf_buffer.getvalue(),
+                    file_name=f"rapport_data_quality_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.pdf",
+                    mime="application/pdf",
+                    type="primary"
+                )
+            
+            with col_pdf2:
+                st.info("📊 Le rapport inclut: page de garde, résumé exécutif, analyses détaillées et visualisations")
 
 
 # ----------------------------------------------------
