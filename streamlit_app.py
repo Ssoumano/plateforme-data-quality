@@ -159,53 +159,131 @@ def openai_generate_synthesis(df, profil):
         return "OpenAI non configuré. Ajoute OPENAI_API_KEY dans les secrets Streamlit."
 
     schema = ""
-    for col in df.columns[:10]:  # Limiter à 10 colonnes pour le prompt
-        schema += f"- {col}: {str(df[col].head(5).tolist())[:120]}...\n"
+    for col in df.columns[:15]:  # Limiter à 15 colonnes pour le prompt
+        missing = profil['missing_pct'][col]
+        schema += f"- {col} ({profil['dtypes'][col]}): {missing:.1f}% manquant, {df[col].nunique()} valeurs uniques\n"
 
     missing_mean = pd.Series(profil['missing_pct']).mean()
+    total_missing = sum(profil['missing_count'].values())
+    
+    # Top colonnes avec valeurs manquantes
+    top_missing = pd.Series(profil['missing_pct']).sort_values(ascending=False).head(5)
+    top_missing_str = "\n".join([f"  - {col}: {pct:.1f}%" for col, pct in top_missing.items()])
     
     prompt = f"""
-    Tu es consultant expert en Data Quality.
-    Données : Lignes {profil['rows']}, Colonnes {profil['cols']}.
-    Détail : missing_pct_mean={missing_mean:.2f}, duplicates={profil['duplicate_rows']}, 
-    outliers={profil['outliers']}, constant_columns={profil['constant_columns']}
+    Tu es consultant expert en Data Quality. Analyse ce dataset et fournis un rapport DÉTAILLÉ et STRUCTURÉ.
 
-    Donne :
-    1) Une synthèse professionnelle (10-15 lignes).
-    2) Un tableau Priorité | Problème | Colonnes | Recommandation.
-    3) 5 quick wins.
+    ## Données globales
+    - Lignes: {profil['rows']:,}
+    - Colonnes: {profil['cols']}
+    - Score global: {profil['global_score']}%
+    - Valeurs manquantes totales: {total_missing:,} ({missing_mean:.2f}% en moyenne)
+    - Doublons: {profil['duplicate_rows']}
+    - Colonnes constantes: {len(profil['constant_columns'])}
+    - Colonnes vides: {len(profil['empty_columns'])}
+
+    ## Top 5 colonnes avec valeurs manquantes
+{top_missing_str}
+
+    ## Outliers détectés (IQR)
+    {dict(list(profil['outliers'].items())[:5])}
+
+    ## Schéma (extrait)
+{schema}
+
+    ## Format attendu de ta réponse:
+
+    ### Synthèse Professionnelle
+    Rédige une analyse détaillée (15-20 lignes) couvrant:
+    - État général du dataset (points forts et faiblesses)
+    - Problématiques majeures identifiées avec impact business
+    - Risques pour les analyses (biais, fiabilité, cohérence)
+    - Axes d'amélioration prioritaires
+
+    ### Tableau de Priorisation
+    Format MARKDOWN uniquement:
+    
+    | Priorité | Problème | Colonnes concernées | Impact | Recommandation |
+    |----------|----------|---------------------|--------|----------------|
+    | Élevée | [problème détaillé] | [colonnes] | [impact chiffré] | [action concrète] |
+    
+    Minimum 5 lignes, maximum 8 lignes.
+
+    ### 5 Quick Wins
+    Liste numérotée d'actions rapides et concrètes, format:
+    1. **[Titre de l'action]** : Description précise de l'action et bénéfice attendu (1-2 phrases).
+
+    IMPORTANT: 
+    - Sois PRÉCIS avec les noms de colonnes exacts
+    - Quantifie les impacts (nombre de lignes, % de données)
+    - Priorise selon criticité réelle
+    - Évite les généralités, sois actionnable
     """
 
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "Tu es un consultant senior expert en qualité des données."},
+            {"role": "system", "content": "Tu es un consultant senior expert en qualité des données. Tu fournis des analyses détaillées, structurées et actionnables."},
             {"role": "user", "content": prompt}
         ],
-        max_tokens=2500,
+        max_tokens=3500,
         temperature=0.2
     )
 
     return clean_ai_text(resp.choices[0].message.content)
 
 
-def openai_suggest_tests(df):
+def openai_suggest_tests(df, profil, col_types):
     if client is None:
         return "OpenAI non configuré."
 
     schema = ""
-    for col in df.columns[:10]:
-        schema += f"- {col}: {str(df[col].head(5).tolist())[:120]}...\n"
+    for col in df.columns[:15]:
+        col_type = col_types.get(col, "unknown")
+        missing = profil['missing_pct'][col]
+        unique = df[col].nunique()
+        schema += f"- {col} ({col_type}, pandas: {profil['dtypes'][col]}): {missing:.1f}% manquant, {unique} valeurs uniques\n"
 
-    prompt = f"Propose 5-10 tests de data quality adaptés au schéma suivant:\n{schema}"
+    prompt = f"""
+    Tu es expert en data quality testing.
+    
+    Voici le schéma d'un dataset:
+{schema}
+
+    Dataset: {profil['rows']} lignes, {profil['cols']} colonnes
+    
+    Propose 8-12 tests de qualité SPÉCIFIQUES et ACTIONNABLES pour ce dataset.
+    
+    Format pour chaque test:
+    
+    ## [Numéro]. [Nom du test]
+    **Objectif:** [Pourquoi ce test?]
+    **Colonnes:** [Colonnes exactes à tester]
+    **Méthode:** [Comment tester concrètement]
+    **Critère de succès:** [Seuil de validation]
+    
+    Exemple:
+    ## 1. Unicité des Identifiants
+    **Objectif:** Vérifier qu'il n'y a pas de doublons dans les clés primaires
+    **Colonnes:** code_departement, code_commune, numero
+    **Méthode:** Vérifier que la combinaison (code_departement, code_commune, numero) est unique
+    **Critère de succès:** 0 doublon détecté
+    
+    Couvre ces dimensions:
+    - Complétude (champs obligatoires non nuls)
+    - Validité (formats, types, plages de valeurs)
+    - Cohérence (relations entre colonnes, règles métier)
+    - Unicité (identifiants, clés)
+    - Exactitude (valeurs aberrantes, outliers)
+    """
 
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "Expert en data quality."},
+            {"role": "system", "content": "Tu es un expert en data quality testing. Tu proposes des tests précis, mesurables et actionnables."},
             {"role": "user", "content": prompt}
         ],
-        max_tokens=1500,
+        max_tokens=2500,
         temperature=0.2
     )
 
@@ -442,7 +520,7 @@ if page == "Testez la qualité de vos données":
             st.markdown("---")
             st.subheader("🧠 Synthèse globale")
 
-            with st.spinner("Analyse en cours..."):
+            with st.spinner("Analyse IA en cours..."):
                 synthesis = openai_generate_synthesis(df, profil)
 
             st.markdown(synthesis)
@@ -450,9 +528,13 @@ if page == "Testez la qualité de vos données":
             # ----------------------------------------------------
             # Tests OpenAI
             # ----------------------------------------------------
+            st.markdown("---")
             st.subheader("🧪 Tests complémentaires suggérés")
-            tests = openai_suggest_tests(df)
-            st.write(tests)
+            
+            with st.spinner("Génération des tests recommandés..."):
+                tests = openai_suggest_tests(df, profil, col_types)
+            
+            st.markdown(tests)
 
             # ----------------------------------------------------
             # 📊 Profiling détaillé des colonnes
