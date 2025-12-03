@@ -609,18 +609,45 @@ if page == "Testez la qualité de vos données":
                 })
             
             # Suggestion 4: Imputer les valeurs manquantes
-            high_missing = pd.Series(profil['missing_pct'])
-            high_missing = high_missing[high_missing > 5].sort_values(ascending=False)
+            missing_pct_series = pd.Series(profil['missing_pct'])
+            high_missing = missing_pct_series[missing_pct_series > 0].sort_values(ascending=False)
             
-            if not high_missing.empty:
-                for col in high_missing.head(3).index:
+            if len(high_missing) > 0:
+                # Ajouter suggestion pour chaque colonne avec des valeurs manquantes
+                for col in high_missing.index:
+                    missing_pct = high_missing[col]
+                    missing_count = profil['missing_count'][col]
+                    
                     if pd.api.types.is_numeric_dtype(df[col]):
                         suggestions.append({
-                            'action': f'Imputer {col}',
+                            'action': f'Imputer "{col}" (numérique)',
                             'colonnes': col,
-                            'impact': f"{high_missing[col]:.1f}% manquant",
+                            'impact': f"{missing_pct:.1f}% manquant ({missing_count} valeurs)",
                             'code': f"df['{col}'].fillna(df['{col}'].median(), inplace=True)"
                         })
+                    else:
+                        suggestions.append({
+                            'action': f'Imputer "{col}" (catégoriel)',
+                            'colonnes': col,
+                            'impact': f"{missing_pct:.1f}% manquant ({missing_count} valeurs)",
+                            'code': f"df['{col}'].fillna(df['{col}'].mode()[0], inplace=True)  # ou fillna('INCONNU')"
+                        })
+            
+            # Suggestion 5: Outliers excessifs
+            outliers_high = {k: v for k, v in profil['outliers'].items() if v > 10}
+            if outliers_high:
+                for col, count in list(outliers_high.items())[:3]:
+                    suggestions.append({
+                        'action': f'Traiter outliers dans "{col}"',
+                        'colonnes': col,
+                        'impact': f"{count} outliers détectés",
+                        'code': f"""# Option 1: Winsorisation (cap aux percentiles)
+q1, q99 = df['{col}'].quantile([0.01, 0.99])
+df['{col}'] = df['{col}'].clip(lower=q1, upper=q99)
+
+# Option 2: Suppression
+# df = df[~((df['{col}'] < q1 - 1.5*iqr) | (df['{col}'] > q3 + 1.5*iqr))]"""
+                    })
             
             if suggestions:
                 sugg_df = pd.DataFrame(suggestions)
