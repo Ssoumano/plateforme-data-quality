@@ -49,37 +49,85 @@ def detect_separator(uploaded_file_bytes: bytes) -> str:
     return ','
 
 
-def load_dataframe(uploaded_file):
-    if uploaded_file is None:
-        return None
-    name = uploaded_file.name.lower()
-    data = uploaded_file.getvalue()
+@st.cache_data
+def load_dataframe(uploaded_file_name: str, uploaded_file_bytes: bytes):
+    """Load dataframe with caching for performance"""
+    name = uploaded_file_name.lower()
 
     if name.endswith('.csv'):
-        sep = detect_separator(data)
-        return pd.read_csv(io.BytesIO(data), sep=sep, encoding='utf-8', engine='python')
+        sep = detect_separator(uploaded_file_bytes)
+        return pd.read_csv(io.BytesIO(uploaded_file_bytes), sep=sep, encoding='utf-8', engine='python')
     elif name.endswith(('.xls', '.xlsx')):
-        return pd.read_excel(io.BytesIO(data))
+        return pd.read_excel(io.BytesIO(uploaded_file_bytes))
     else:
-        return pd.read_csv(io.BytesIO(data), encoding='utf-8')
+        return pd.read_csv(io.BytesIO(uploaded_file_bytes), encoding='utf-8')
+
+
+# ----------------------------------------------------
+# Détection automatique des types de colonnes
+# ----------------------------------------------------
+@st.cache_data
+def detect_column_types(df_dict):
+    """Detect column types automatically"""
+    df = pd.DataFrame(df_dict)
+    types = {}
+    
+    for col in df.columns:
+        # Ignorer les colonnes vides
+        if df[col].isna().all():
+            types[col] = 'empty'
+            continue
+        
+        # Tenter de convertir en datetime
+        try:
+            if df[col].dtype == 'object':
+                converted = pd.to_datetime(df[col], errors='coerce')
+                if converted.notna().sum() > len(df) * 0.8:
+                    types[col] = 'datetime'
+                    continue
+        except:
+            pass
+        
+        # Vérifier si numérique
+        if pd.api.types.is_numeric_dtype(df[col]):
+            unique_ratio = df[col].nunique() / len(df)
+            if unique_ratio < 0.05:  # Peu de valeurs uniques
+                types[col] = 'categorical'
+            else:
+                types[col] = 'numeric'
+        else:
+            # Vérifier si binaire
+            nunique = df[col].nunique()
+            if nunique == 2:
+                types[col] = 'binary'
+            elif nunique / len(df) < 0.05:
+                types[col] = 'categorical'
+            else:
+                types[col] = 'text'
+    
+    return types
 
 
 # ----------------------------------------------------
 # Data Profiling
 # ----------------------------------------------------
-def profile_data_quality(df: pd.DataFrame) -> dict:
+@st.cache_data
+def profile_data_quality(df_dict) -> dict:
+    """Profile data quality with caching"""
+    df = pd.DataFrame(df_dict)
+    
     profil = {}
     profil['rows'] = int(df.shape[0])
     profil['cols'] = int(df.shape[1])
-    profil['missing_count'] = df.isna().sum()
-    profil['missing_pct'] = (df.isna().mean() * 100).round(2)
-    profil['dtypes'] = df.dtypes.astype(str)
+    profil['missing_count'] = df.isna().sum().to_dict()
+    profil['missing_pct'] = (df.isna().mean() * 100).round(2).to_dict()
+    profil['dtypes'] = df.dtypes.astype(str).to_dict()
     profil['constant_columns'] = [c for c in df.columns if df[c].nunique(dropna=True) <= 1]
     profil['empty_columns'] = [c for c in df.columns if df[c].dropna().shape[0] == 0]
     profil['duplicate_rows'] = int(df.duplicated().sum())
 
     numeric = df.select_dtypes(include=[np.number])
-    profil['numeric_stats'] = numeric.describe().T
+    profil['numeric_stats'] = numeric.describe().T.to_dict()
 
     # Outliers via IQR
     outliers = {}
@@ -94,7 +142,8 @@ def profile_data_quality(df: pd.DataFrame) -> dict:
     profil['outliers'] = outliers
 
     # Global score
-    miss_score = max(0, 100 - profil["missing_pct"].mean())
+    missing_mean = pd.Series(profil['missing_pct']).mean()
+    miss_score = max(0, 100 - missing_mean)
     dup_score = max(0, 100 - (profil["duplicate_rows"]/max(1, profil["rows"])) * 100)
     out_score = max(0, 100 - (np.mean(list(outliers.values())) if outliers else 0))
     profil["global_score"] = round((miss_score*0.5 + dup_score*0.3 + out_score*0.2), 1)
@@ -110,13 +159,15 @@ def openai_generate_synthesis(df, profil):
         return "OpenAI non configuré. Ajoute OPENAI_API_KEY dans les secrets Streamlit."
 
     schema = ""
-    for col in df.columns:
+    for col in df.columns[:10]:  # Limiter à 10 colonnes pour le prompt
         schema += f"- {col}: {str(df[col].head(5).tolist())[:120]}...\n"
 
+    missing_mean = pd.Series(profil['missing_pct']).mean()
+    
     prompt = f"""
     Tu es consultant expert en Data Quality.
     Données : Lignes {profil['rows']}, Colonnes {profil['cols']}.
-    Détail : missing_pct_mean={profil['missing_pct'].mean()}, duplicates={profil['duplicate_rows']}, 
+    Détail : missing_pct_mean={missing_mean:.2f}, duplicates={profil['duplicate_rows']}, 
     outliers={profil['outliers']}, constant_columns={profil['constant_columns']}
 
     Donne :
@@ -143,7 +194,7 @@ def openai_suggest_tests(df):
         return "OpenAI non configuré."
 
     schema = ""
-    for col in df.columns:
+    for col in df.columns[:10]:
         schema += f"- {col}: {str(df[col].head(5).tolist())[:120]}...\n"
 
     prompt = f"Propose 5-10 tests de data quality adaptés au schéma suivant:\n{schema}"
@@ -187,7 +238,7 @@ def build_pdf(report_text, profil, df, figs_bytes_list):
         ["Lignes", profil['rows']],
         ["Colonnes", profil['cols']],
         ["Score global", f"{profil['global_score']}%"],
-        ["Valeurs manquantes (total)", int(profil['missing_count'].sum())],
+        ["Valeurs manquantes (total)", int(sum(profil['missing_count'].values()))],
         ["Doublons", profil['duplicate_rows']],
     ]
     t = Table(meta, hAlign='LEFT')
@@ -267,12 +318,17 @@ if page == "Testez la qualité de vos données":
     uploaded_file = st.file_uploader("📥 Importer un fichier", type=["csv", "xlsx", "xls"])
 
     if uploaded_file:
-        df = load_dataframe(uploaded_file)
+        # Load avec cache
+        file_bytes = uploaded_file.getvalue()
+        df = load_dataframe(uploaded_file.name, file_bytes)
 
         if df is None:
             st.error("❌ Impossible de lire le fichier.")
         else:
-            profil = profile_data_quality(df)
+            # Convertir en dict pour le cache
+            df_dict = df.to_dict('list')
+            profil = profile_data_quality(df_dict)
+            col_types = detect_column_types(df_dict)
 
             # ----------------------------------------------------
             # KPI Tiles
@@ -312,7 +368,7 @@ if page == "Testez la qualité de vos données":
 
             c2.markdown(tile_style.format(
                 bg="white", text=dark, muted="#666",
-                label="Valeurs manquantes", value=int(profil["missing_count"].sum()),
+                label="Valeurs manquantes", value=int(sum(profil["missing_count"].values())),
                 subtitle="Total de NA", icon="❗"), unsafe_allow_html=True)
 
             c3.markdown(tile_style.format(
@@ -329,6 +385,26 @@ if page == "Testez la qualité de vos données":
             st.markdown("---")
 
             # ----------------------------------------------------
+            # Récapitulatif des types de colonnes
+            # ----------------------------------------------------
+            st.subheader("🏷️ Typologie des colonnes")
+            
+            type_counts = pd.Series(col_types).value_counts()
+            col_type1, col_type2 = st.columns([1, 2])
+            
+            with col_type1:
+                st.dataframe(type_counts.to_frame('Nombre'), use_container_width=True)
+            
+            with col_type2:
+                fig_types, ax_types = plt.subplots(figsize=(8, 4))
+                type_counts.plot(kind='barh', ax=ax_types, color='#118DFF')
+                ax_types.set_title("Distribution des types de colonnes")
+                ax_types.set_xlabel("Nombre de colonnes")
+                st.pyplot(fig_types)
+
+            st.markdown("---")
+
+            # ----------------------------------------------------
             # DataFrame Preview
             # ----------------------------------------------------
             st.subheader("📄 Aperçu du DataFrame")
@@ -337,6 +413,7 @@ if page == "Testez la qualité de vos données":
             # ----------------------------------------------------
             # Outlier Heatmap
             # ----------------------------------------------------
+            st.markdown("---")
             st.subheader("🔥 Heatmap des Outliers (IQR)")
 
             outlier_df = pd.DataFrame(
@@ -378,8 +455,213 @@ if page == "Testez la qualité de vos données":
             st.write(tests)
 
             # ----------------------------------------------------
+            # 📊 Profiling détaillé des colonnes
+            # ----------------------------------------------------
+            st.markdown("---")
+            st.subheader("📊 Profiling détaillé des colonnes")
+            
+            col_select = st.selectbox("Sélectionnez une colonne à analyser", df.columns)
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Type détecté", col_types.get(col_select, "unknown"))
+                st.metric("Type pandas", str(df[col_select].dtype))
+                st.metric("Valeurs uniques", df[col_select].nunique())
+            
+            with col2:
+                st.metric("Valeurs manquantes", f"{(df[col_select].isna().mean()*100):.1f}%")
+                st.metric("Valeurs nulles", df[col_select].isna().sum())
+            
+            with col3:
+                st.metric("Taux de remplissage", f"{((1-df[col_select].isna().mean())*100):.1f}%")
+                st.metric("Cardinalité", f"{(df[col_select].nunique()/len(df)*100):.1f}%")
+            
+            # Visualisation selon le type
+            if pd.api.types.is_numeric_dtype(df[col_select]):
+                fig_prof, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+                
+                # Histogramme
+                df[col_select].dropna().hist(bins=30, ax=ax1, color='#118DFF', edgecolor='white')
+                ax1.set_title(f"Distribution de {col_select}")
+                ax1.set_xlabel("Valeur")
+                ax1.set_ylabel("Fréquence")
+                ax1.grid(True, alpha=0.3)
+                
+                # Boxplot
+                df[col_select].dropna().plot(kind='box', ax=ax2, color='#118DFF')
+                ax2.set_title(f"Boxplot de {col_select}")
+                ax2.set_ylabel("Valeur")
+                ax2.grid(True, alpha=0.3)
+                
+                st.pyplot(fig_prof)
+                
+                # Statistiques descriptives
+                st.write("**Statistiques descriptives:**")
+                st.dataframe(df[col_select].describe().to_frame())
+                
+            else:
+                # Pour colonnes catégorielles
+                top_values = df[col_select].value_counts().head(10)
+                
+                fig_prof, ax = plt.subplots(figsize=(10, 6))
+                top_values.plot(kind='barh', ax=ax, color='#118DFF')
+                ax.set_title(f"Top 10 des valeurs - {col_select}")
+                ax.set_xlabel("Fréquence")
+                ax.grid(True, alpha=0.3, axis='x')
+                
+                st.pyplot(fig_prof)
+                
+                st.write("**Top 20 des valeurs:**")
+                st.dataframe(df[col_select].value_counts().head(20).to_frame())
+
+            # ----------------------------------------------------
+            # 🔍 Matrice de corrélation des valeurs manquantes
+            # ----------------------------------------------------
+            st.markdown("---")
+            st.subheader("🔍 Matrice de corrélation des valeurs manquantes")
+            
+            missing_matrix = df.isna().astype(int)
+            
+            if missing_matrix.sum().sum() > 0:
+                missing_corr = missing_matrix.corr()
+                
+                fig_corr, ax_corr = plt.subplots(figsize=(12, 10))
+                sns.heatmap(missing_corr, annot=True, fmt=".2f", 
+                           cmap='coolwarm', center=0,
+                           square=True, linewidths=0.5,
+                           cbar_kws={"shrink": 0.8},
+                           ax=ax_corr)
+                ax_corr.set_title("Corrélation entre colonnes avec valeurs manquantes\n(1 = manquent toujours ensemble)")
+                
+                st.pyplot(fig_corr)
+                
+                st.info("💡 Une corrélation élevée (>0.7) indique que les valeurs manquent souvent ensemble dans ces colonnes.")
+            else:
+                st.success("✅ Aucune valeur manquante détectée!")
+
+            # ----------------------------------------------------
+            # 📈 Évolution temporelle (si colonne date détectée)
+            # ----------------------------------------------------
+            date_cols = [col for col in df.columns if col_types.get(col) == 'datetime' 
+                        or 'date' in col.lower() or 'time' in col.lower()]
+            
+            if date_cols:
+                st.markdown("---")
+                st.subheader("📈 Analyse temporelle")
+                
+                date_col = st.selectbox("Sélectionnez une colonne de date", date_cols)
+                
+                try:
+                    df_temp = df.copy()
+                    if not pd.api.types.is_datetime64_any_dtype(df_temp[date_col]):
+                        df_temp[date_col] = pd.to_datetime(df_temp[date_col], errors='coerce')
+                    
+                    df_temp = df_temp.sort_values(date_col)
+                    df_temp['missing_count'] = df_temp.isna().sum(axis=1)
+                    
+                    fig_time, ax_time = plt.subplots(figsize=(12, 5))
+                    df_temp.groupby(df_temp[date_col].dt.to_period('M'))['missing_count'].mean().plot(
+                        ax=ax_time, color='#F2C811', marker='o', linewidth=2
+                    )
+                    ax_time.set_title("Évolution des valeurs manquantes par mois")
+                    ax_time.set_xlabel("Période")
+                    ax_time.set_ylabel("Moyenne de valeurs manquantes par ligne")
+                    ax_time.grid(True, alpha=0.3)
+                    
+                    st.pyplot(fig_time)
+                except Exception as e:
+                    st.warning(f"Impossible d'analyser la dimension temporelle: {str(e)}")
+
+            # ----------------------------------------------------
+            # 🎯 Suggestions de nettoyage automatiques
+            # ----------------------------------------------------
+            st.markdown("---")
+            st.subheader("🎯 Suggestions de nettoyage")
+            
+            suggestions = []
+            
+            # Suggestion 1: Supprimer colonnes vides
+            if profil['empty_columns']:
+                suggestions.append({
+                    'action': 'Supprimer colonnes vides',
+                    'colonnes': ', '.join(profil['empty_columns']),
+                    'impact': f"{len(profil['empty_columns'])} colonnes",
+                    'code': f"df = df.drop(columns={profil['empty_columns']})"
+                })
+            
+            # Suggestion 2: Supprimer colonnes constantes
+            if profil['constant_columns']:
+                suggestions.append({
+                    'action': 'Supprimer colonnes constantes',
+                    'colonnes': ', '.join(profil['constant_columns']),
+                    'impact': f"{len(profil['constant_columns'])} colonnes",
+                    'code': f"df = df.drop(columns={profil['constant_columns']})"
+                })
+            
+            # Suggestion 3: Traiter les doublons
+            if profil['duplicate_rows'] > 0:
+                suggestions.append({
+                    'action': 'Supprimer les doublons',
+                    'colonnes': 'Toutes',
+                    'impact': f"{profil['duplicate_rows']} lignes",
+                    'code': "df = df.drop_duplicates()"
+                })
+            
+            # Suggestion 4: Imputer les valeurs manquantes
+            high_missing = pd.Series(profil['missing_pct'])
+            high_missing = high_missing[high_missing > 5].sort_values(ascending=False)
+            
+            if not high_missing.empty:
+                for col in high_missing.head(3).index:
+                    if pd.api.types.is_numeric_dtype(df[col]):
+                        suggestions.append({
+                            'action': f'Imputer {col}',
+                            'colonnes': col,
+                            'impact': f"{high_missing[col]:.1f}% manquant",
+                            'code': f"df['{col}'].fillna(df['{col}'].median(), inplace=True)"
+                        })
+            
+            if suggestions:
+                sugg_df = pd.DataFrame(suggestions)
+                st.dataframe(sugg_df[['action', 'colonnes', 'impact']], use_container_width=True)
+                
+                with st.expander("📝 Voir le code de nettoyage"):
+                    code = "# Code de nettoyage suggéré\nimport pandas as pd\n\n"
+                    for s in suggestions:
+                        code += f"# {s['action']}\n{s['code']}\n\n"
+                    st.code(code, language='python')
+                
+                if st.button("🔧 Appliquer toutes les corrections", type="primary"):
+                    df_cleaned = df.copy()
+                    
+                    # Appliquer les corrections
+                    if profil['empty_columns']:
+                        df_cleaned = df_cleaned.drop(columns=profil['empty_columns'])
+                    if profil['constant_columns']:
+                        df_cleaned = df_cleaned.drop(columns=profil['constant_columns'])
+                    if profil['duplicate_rows'] > 0:
+                        df_cleaned = df_cleaned.drop_duplicates()
+                    
+                    st.success(f"✅ Nettoyage appliqué! {len(df)} → {len(df_cleaned)} lignes, {df.shape[1]} → {df_cleaned.shape[1]} colonnes")
+                    
+                    # Download cleaned file
+                    csv_cleaned = df_cleaned.to_csv(index=False).encode('utf-8')
+                    st.download_button(
+                        label="📥 Télécharger le fichier nettoyé",
+                        data=csv_cleaned,
+                        file_name="data_cleaned.csv",
+                        mime="text/csv"
+                    )
+            else:
+                st.success("✅ Aucune correction automatique suggérée - vos données sont déjà de bonne qualité!")
+
+            # ----------------------------------------------------
             # PDF Export
             # ----------------------------------------------------
+            st.markdown("---")
+            st.subheader("📄 Export du rapport")
+            
             fig_bytes = [fig_to_bytes(fig1)]
 
             pdf_buffer = build_pdf(synthesis, profil, df, fig_bytes)
@@ -399,6 +681,3 @@ elif page == "Contact":
     st.write("**Téléphone :** +33 6 64 67 88 87")
     st.write("**LinkedIn :** https://linkedin.com/in/seydou-soumano")
     st.write("**GitHub :** https://github.com/Ssoumano")
-
-
-
