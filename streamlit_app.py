@@ -1,4 +1,4 @@
-# streamlit_app.py
+# streamlit_app.py - PARTIE 1/2
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -11,10 +11,12 @@ from reportlab.lib import colors
 from reportlab.platypus import (
     SimpleDocTemplate, Paragraph, Spacer, Image as RLImage, Table, TableStyle, PageBreak
 )
-from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.enums import TA_CENTER, TA_LEFT
 from reportlab.lib.units import cm
 from PIL import Image
 import base64
+from datetime import datetime
 
 
 # ----------------------------------------------------
@@ -26,30 +28,21 @@ def clean_ai_text(text: str) -> str:
     text = text.replace("* *", " ")
     text = text.replace("** **", " ")
     text = text.replace("• •", "• ")
-    text = text.replace("\u200b", "")  # caractères invisibles
+    text = text.replace("\u200b", "")
     return text
 
 
 def escape_for_reportlab(text: str) -> str:
-    """Échappe le texte pour ReportLab en enlevant les balises HTML problématiques"""
+    """Échappe le texte pour ReportLab"""
     import re
-    
-    # Remplacer ** par du gras proper
     text = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', text)
-    
-    # Échapper les caractères spéciaux HTML
     text = text.replace('&', '&amp;')
     text = text.replace('<', '&lt;').replace('>', '&gt;')
-    
-    # Restaurer les balises que nous voulons garder
     text = text.replace('&lt;b&gt;', '<b>').replace('&lt;/b&gt;', '</b>')
     text = text.replace('&lt;i&gt;', '<i>').replace('&lt;/i&gt;', '</i>')
     text = text.replace('&lt;br/&gt;', '<br/>')
-    
-    # Nettoyer les balises mal formées
     text = re.sub(r'<b>\s*</b>', '', text)
     text = re.sub(r'<i>\s*</i>', '', text)
-    
     return text
 
 
@@ -77,7 +70,6 @@ def detect_separator(uploaded_file_bytes: bytes) -> str:
 def load_dataframe(uploaded_file_name: str, uploaded_file_bytes: bytes):
     """Load dataframe with caching for performance"""
     name = uploaded_file_name.lower()
-
     if name.endswith('.csv'):
         sep = detect_separator(uploaded_file_bytes)
         return pd.read_csv(io.BytesIO(uploaded_file_bytes), sep=sep, encoding='utf-8', engine='python')
@@ -97,12 +89,10 @@ def detect_column_types(df_dict):
     types = {}
     
     for col in df.columns:
-        # Ignorer les colonnes vides
         if df[col].isna().all():
             types[col] = 'empty'
             continue
         
-        # Tenter de convertir en datetime
         try:
             if df[col].dtype == 'object':
                 converted = pd.to_datetime(df[col], errors='coerce')
@@ -112,15 +102,13 @@ def detect_column_types(df_dict):
         except:
             pass
         
-        # Vérifier si numérique
         if pd.api.types.is_numeric_dtype(df[col]):
             unique_ratio = df[col].nunique() / len(df)
-            if unique_ratio < 0.05:  # Peu de valeurs uniques
+            if unique_ratio < 0.05:
                 types[col] = 'categorical'
             else:
                 types[col] = 'numeric'
         else:
-            # Vérifier si binaire
             nunique = df[col].nunique()
             if nunique == 2:
                 types[col] = 'binary'
@@ -151,9 +139,12 @@ def profile_data_quality(df_dict) -> dict:
     profil['duplicate_rows'] = int(df.duplicated().sum())
 
     numeric = df.select_dtypes(include=[np.number])
-    profil['numeric_stats'] = numeric.describe().T.to_dict()
+    
+    if len(numeric.columns) > 0:
+        profil['numeric_stats'] = numeric.describe().T.to_dict()
+    else:
+        profil['numeric_stats'] = {}
 
-    # Outliers via IQR
     outliers = {}
     for col in numeric.columns:
         x = df[col].dropna()
@@ -165,8 +156,7 @@ def profile_data_quality(df_dict) -> dict:
         outliers[col] = int(((x < q1 - 1.5 * iqr) | (x > q3 + 1.5 * iqr)).sum())
     profil['outliers'] = outliers
 
-    # Global score
-    missing_mean = pd.Series(profil['missing_pct']).mean()
+    missing_mean = pd.Series(profil['missing_pct']).mean() if profil['missing_pct'] else 0
     miss_score = max(0, 100 - missing_mean)
     dup_score = max(0, 100 - (profil["duplicate_rows"]/max(1, profil["rows"])) * 100)
     out_score = max(0, 100 - (np.mean(list(outliers.values())) if outliers else 0))
@@ -176,21 +166,20 @@ def profile_data_quality(df_dict) -> dict:
 
 
 # ----------------------------------------------------
-# OpenAI Reports (Synthèse + Tests)
+# OpenAI Reports
 # ----------------------------------------------------
 def openai_generate_synthesis(df, profil):
     if client is None:
-        return "OpenAI non configuré. Ajoute OPENAI_API_KEY dans les secrets Streamlit."
+        return "OpenAI non configuré."
 
     schema = ""
-    for col in df.columns[:15]:  # Limiter à 15 colonnes pour le prompt
+    for col in df.columns[:15]:
         missing = profil['missing_pct'][col]
         schema += f"- {col} ({profil['dtypes'][col]}): {missing:.1f}% manquant, {df[col].nunique()} valeurs uniques\n"
 
     missing_mean = pd.Series(profil['missing_pct']).mean()
     total_missing = sum(profil['missing_count'].values())
     
-    # Top colonnes avec valeurs manquantes
     top_missing = pd.Series(profil['missing_pct']).sort_values(ascending=False).head(5)
     top_missing_str = "\n".join([f"  - {col}: {pct:.1f}%" for col, pct in top_missing.items()])
     
@@ -212,42 +201,35 @@ def openai_generate_synthesis(df, profil):
     ## Outliers détectés (IQR)
     {dict(list(profil['outliers'].items())[:5])}
 
-    ## Schéma (extrait)
-{schema}
-
-    ## Format attendu de ta réponse:
+    ## Format attendu:
 
     ### Synthèse Professionnelle
     Rédige une analyse détaillée (15-20 lignes) couvrant:
-    - État général du dataset (points forts et faiblesses)
-    - Problématiques majeures identifiées avec impact business
-    - Risques pour les analyses (biais, fiabilité, cohérence)
+    - État général du dataset
+    - Problématiques majeures avec impact business
+    - Risques pour les analyses
     - Axes d'amélioration prioritaires
 
     ### Tableau de Priorisation
-    Format MARKDOWN uniquement:
+    Format MARKDOWN:
     
-    | Priorité | Problème | Colonnes concernées | Impact | Recommandation |
-    |----------|----------|---------------------|--------|----------------|
-    | Élevée | [problème détaillé] | [colonnes] | [impact chiffré] | [action concrète] |
+    | Priorité | Problème | Colonnes | Recommandation |
+    |----------|----------|----------|----------------|
+    | Élevée | [problème] | [colonnes] | [action] |
     
-    Minimum 5 lignes, maximum 8 lignes.
+    IMPORTANT:
+    - Colonne "Colonnes": MAX 20 caractères
+    - Colonne "Recommandation": MAX 60 caractères
+    - 5-8 lignes
 
     ### 5 Quick Wins
-    Liste numérotée d'actions rapides et concrètes, format:
-    1. **[Titre de l'action]** : Description précise de l'action et bénéfice attendu (1-2 phrases).
-
-    IMPORTANT: 
-    - Sois PRÉCIS avec les noms de colonnes exacts
-    - Quantifie les impacts (nombre de lignes, % de données)
-    - Priorise selon criticité réelle
-    - Évite les généralités, sois actionnable
+    1. **[Titre]**: Description (MAX 100 caractères).
     """
 
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "Tu es un consultant senior expert en qualité des données. Tu fournis des analyses détaillées, structurées et actionnables."},
+            {"role": "system", "content": "Tu es un consultant senior expert en qualité des données."},
             {"role": "user", "content": prompt}
         ],
         max_tokens=3500,
@@ -266,45 +248,28 @@ def openai_suggest_tests(df, profil, col_types):
         col_type = col_types.get(col, "unknown")
         missing = profil['missing_pct'][col]
         unique = df[col].nunique()
-        schema += f"- {col} ({col_type}, pandas: {profil['dtypes'][col]}): {missing:.1f}% manquant, {unique} valeurs uniques\n"
+        schema += f"- {col} ({col_type}): {missing:.1f}% manquant, {unique} uniques\n"
 
     prompt = f"""
-    Tu es expert en data quality testing.
+    Expert en data quality testing.
     
-    Voici le schéma d'un dataset:
+    Dataset:
 {schema}
 
-    Dataset: {profil['rows']} lignes, {profil['cols']} colonnes
+    Propose 8-12 tests SPÉCIFIQUES.
     
-    Propose 8-12 tests de qualité SPÉCIFIQUES et ACTIONNABLES pour ce dataset.
-    
-    Format pour chaque test:
-    
-    ## [Numéro]. [Nom du test]
-    **Objectif:** [Pourquoi ce test?]
-    **Colonnes:** [Colonnes exactes à tester]
-    **Méthode:** [Comment tester concrètement]
-    **Critère de succès:** [Seuil de validation]
-    
-    Exemple:
-    ## 1. Unicité des Identifiants
-    **Objectif:** Vérifier qu'il n'y a pas de doublons dans les clés primaires
-    **Colonnes:** code_departement, code_commune, numero
-    **Méthode:** Vérifier que la combinaison (code_departement, code_commune, numero) est unique
-    **Critère de succès:** 0 doublon détecté
-    
-    Couvre ces dimensions:
-    - Complétude (champs obligatoires non nuls)
-    - Validité (formats, types, plages de valeurs)
-    - Cohérence (relations entre colonnes, règles métier)
-    - Unicité (identifiants, clés)
-    - Exactitude (valeurs aberrantes, outliers)
+    Format:
+    ## [N]. [Nom]
+    **Objectif:** [Pourquoi]
+    **Colonnes:** [Colonnes]
+    **Méthode:** [Comment]
+    **Critère:** [Seuil]
     """
 
     resp = client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[
-            {"role": "system", "content": "Tu es un expert en data quality testing. Tu proposes des tests précis, mesurables et actionnables."},
+            {"role": "system", "content": "Expert en data quality testing."},
             {"role": "user", "content": prompt}
         ],
         max_tokens=2500,
@@ -315,7 +280,7 @@ def openai_suggest_tests(df, profil, col_types):
 
 
 # ----------------------------------------------------
-# PDF Generation - Version Professionnelle
+# PDF Generation - Fonctions graphiques
 # ----------------------------------------------------
 def fig_to_bytes(fig):
     buf = io.BytesIO()
@@ -326,32 +291,23 @@ def fig_to_bytes(fig):
 
 
 def create_gauge_chart(score):
-    """Crée un gauge chart pour le score global"""
     fig, ax = plt.subplots(figsize=(6, 3))
     
-    # Couleurs selon le score
     if score >= 80:
-        color = '#4CAF50'  # Vert
+        color = '#4CAF50'
     elif score >= 60:
-        color = '#FFC107'  # Orange
+        color = '#FFC107'
     else:
-        color = '#F44336'  # Rouge
+        color = '#F44336'
     
-    # Créer le gauge
     from matplotlib.patches import Wedge
-    wedge = Wedge((0.5, 0), 0.4, 0, 180, width=0.15, facecolor=color, edgecolor='white', linewidth=2)
-    ax.add_patch(wedge)
-    
-    # Fond gris
     wedge_bg = Wedge((0.5, 0), 0.4, 0, 180, width=0.15, facecolor='#E0E0E0', edgecolor='white', linewidth=2)
     ax.add_patch(wedge_bg)
     
-    # Indicateur de score
-    angle = score * 1.8  # 0-180 degrés
+    angle = score * 1.8
     wedge_score = Wedge((0.5, 0), 0.4, 0, angle, width=0.15, facecolor=color, edgecolor='white', linewidth=2)
     ax.add_patch(wedge_score)
     
-    # Texte du score
     ax.text(0.5, 0.15, f"{score}%", ha='center', va='center', fontsize=32, fontweight='bold', color=color)
     ax.text(0.5, -0.05, "Score Global", ha='center', va='center', fontsize=12, color='#666')
     
@@ -363,7 +319,6 @@ def create_gauge_chart(score):
 
 
 def create_missing_chart(profil):
-    """Graphique des valeurs manquantes par colonne"""
     missing_data = pd.Series(profil['missing_pct']).sort_values(ascending=False).head(10)
     
     if missing_data.empty or missing_data.sum() == 0:
@@ -378,7 +333,6 @@ def create_missing_chart(profil):
     ax.set_title("Top 10 des colonnes avec valeurs manquantes", fontsize=13, fontweight='bold', pad=15)
     ax.grid(axis='x', alpha=0.3, linestyle='--')
     
-    # Ajouter les valeurs sur les barres
     for i, v in enumerate(missing_data.values):
         ax.text(v + 1, i, f"{v:.1f}%", va='center', fontsize=9)
     
@@ -387,7 +341,6 @@ def create_missing_chart(profil):
 
 
 def create_types_chart(col_types):
-    """Graphique des types de colonnes"""
     type_counts = pd.Series(col_types).value_counts()
     
     fig, ax = plt.subplots(figsize=(8, 6))
@@ -411,12 +364,25 @@ def create_types_chart(col_types):
     return fig
 
 
+def footer(canvas, doc):
+    canvas.saveState()
+    footer_text = f"Rapport Data Quality - Confidentiel | Page {doc.page}"
+    canvas.setFont('Helvetica', 9)
+    canvas.setFillColor(colors.HexColor('#666666'))
+    canvas.drawString(2*cm, 1.5*cm, footer_text)
+    canvas.setStrokeColor(colors.HexColor('#DDDDDD'))
+    canvas.setLineWidth(0.5)
+    canvas.line(2*cm, 2*cm, A4[0]-2*cm, 2*cm)
+    canvas.restoreState()
+
+
+# streamlit_app.py - PARTIE 2/2
+# Coller cette partie APRÈS la partie 1
+
+# ----------------------------------------------------
+# PDF Generation - Fonction principale
+# ----------------------------------------------------
 def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
-    """Génère un PDF professionnel avec design moderne"""
-    from reportlab.lib.styles import ParagraphStyle
-    from reportlab.lib.enums import TA_CENTER, TA_LEFT, TA_JUSTIFY
-    from reportlab.platypus import PageBreak, KeepTogether
-    
     buf = io.BytesIO()
     doc = SimpleDocTemplate(
         buf, 
@@ -424,15 +390,13 @@ def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
         rightMargin=2*cm, 
         leftMargin=2*cm, 
         topMargin=2.5*cm, 
-        bottomMargin=2.5*cm
+        bottomMargin=3*cm
     )
     
     styles = getSampleStyleSheet()
     story = []
     
-    # ============================================
     # PAGE DE GARDE
-    # ============================================
     title_style = ParagraphStyle(
         'CustomTitle',
         parent=styles['Heading1'],
@@ -456,9 +420,8 @@ def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
     story.append(Paragraph("Rapport d'Audit", title_style))
     story.append(Paragraph("Data Quality", title_style))
     story.append(Spacer(1, 1*cm))
-    story.append(Paragraph(f"Généré le {pd.Timestamp.now().strftime('%d/%m/%Y à %H:%M')}", subtitle_style))
+    story.append(Paragraph(f"Généré le {datetime.now().strftime('%d/%m/%Y à %H:%M')}", subtitle_style))
     
-    # Métadonnées en encadré
     meta_data = [
         ['', ''],
         ['📊 Dataset', f"{profil['rows']:,} lignes × {profil['cols']} colonnes"],
@@ -474,7 +437,6 @@ def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
         ('TEXTCOLOR', (0,1), (-1,-2), colors.black),
         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
         ('FONTNAME', (0,1), (0,-2), 'Helvetica-Bold'),
-        ('FONTNAME', (1,1), (1,-2), 'Helvetica'),
         ('FONTSIZE', (0,1), (-1,-2), 12),
         ('GRID', (0,1), (-1,-2), 1, colors.HexColor('#DDDDDD')),
         ('ROWBACKGROUNDS', (0,1), (-1,-2), [colors.white, colors.HexColor('#FAFAFA')]),
@@ -485,13 +447,10 @@ def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
     story.append(meta_table)
     story.append(PageBreak())
     
-    # ============================================
     # RÉSUMÉ EXÉCUTIF
-    # ============================================
     story.append(Paragraph("Résumé Exécutif", styles['Heading1']))
     story.append(Spacer(1, 0.3*cm))
     
-    # Score visuel avec gauge
     gauge_fig = create_gauge_chart(profil['global_score'])
     gauge_bytes = fig_to_bytes(gauge_fig)
     gauge_img = Image.open(gauge_bytes)
@@ -503,7 +462,6 @@ def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
     story.append(RLImage(gauge_buf, width=12*cm, height=6*cm))
     story.append(Spacer(1, 0.5*cm))
     
-    # Indicateurs clés
     kpi_data = [
         ['Indicateur', 'Valeur', 'État'],
         ['Complétude', f"{100 - pd.Series(profil['missing_pct']).mean():.1f}%", 
@@ -523,7 +481,6 @@ def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
         ('ALIGN', (0,0), (-1,-1), 'CENTER'),
         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
         ('FONTSIZE', (0,0), (-1,0), 12),
-        ('BACKGROUND', (0,1), (-1,-1), colors.beige),
         ('GRID', (0,0), (-1,-1), 1, colors.grey),
         ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F9F9F9')]),
         ('TOPPADDING', (0,0), (-1,-1), 10),
@@ -533,13 +490,10 @@ def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
     story.append(kpi_table)
     story.append(PageBreak())
     
-    # ============================================
     # SYNTHÈSE DÉTAILLÉE
-    # ============================================
     story.append(Paragraph("Analyse Détaillée", styles['Heading1']))
     story.append(Spacer(1, 0.5*cm))
     
-    # Parser le texte de synthèse
     sections = report_text.split("###")
     
     for section in sections:
@@ -551,43 +505,49 @@ def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
         section_content = "\n".join(lines[1:]).strip()
         
         if section_title:
-            # Nettoyer le titre
             clean_title = escape_for_reportlab(section_title)
             story.append(Paragraph(clean_title, styles['Heading2']))
             story.append(Spacer(1, 0.3*cm))
         
-        # Si c'est un tableau markdown
         if "|" in section_content and "---" in section_content:
             table_lines = [line for line in section_content.split("\n") if line.strip().startswith("|")]
             
             if len(table_lines) > 2:
-                # Parser le tableau
                 table_data = []
                 for line in table_lines:
                     cells = [cell.strip() for cell in line.split("|")[1:-1]]
                     if "---" not in line:
-                        # Nettoyer chaque cellule
-                        clean_cells = [escape_for_reportlab(cell) for cell in cells]
+                        clean_cells = []
+                        for i, cell in enumerate(cells):
+                            cleaned = escape_for_reportlab(cell)
+                            if i == 2 and len(cleaned) > 35:
+                                cleaned = cleaned[:32] + "..."
+                            elif i == 3 and len(cleaned) > 80:
+                                cleaned = cleaned[:77] + "..."
+                            clean_cells.append(cleaned)
                         table_data.append(clean_cells)
                 
-                # Créer le tableau PDF avec couleurs
                 if table_data:
-                    pdf_table = Table(table_data, colWidths=[2.5*cm, 4*cm, 3.5*cm, 3*cm, 4*cm])
+                    num_cols = len(table_data[0])
+                    if num_cols == 4:
+                        col_widths = [2.5*cm, 4.5*cm, 3.5*cm, 6.5*cm]
+                    else:
+                        col_widths = [17*cm / num_cols] * num_cols
                     
-                    # Style avec couleurs selon priorité
+                    pdf_table = Table(table_data, colWidths=col_widths)
+                    
                     table_style = [
                         ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1976D2')),
                         ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
                         ('ALIGN', (0,0), (-1,-1), 'LEFT'),
                         ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-                        ('FONTSIZE', (0,0), (-1,-1), 9),
+                        ('FONTSIZE', (0,0), (-1,-1), 8),
                         ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
-                        ('TOPPADDING', (0,0), (-1,-1), 8),
-                        ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+                        ('TOPPADDING', (0,0), (-1,-1), 6),
+                        ('BOTTOMPADDING', (0,0), (-1,-1), 6),
                         ('VALIGN', (0,0), (-1,-1), 'TOP'),
                     ]
                     
-                    # Colorer selon priorité
                     for i, row in enumerate(table_data[1:], start=1):
                         if 'Élevée' in row[0] or 'Haute' in row[0]:
                             table_style.append(('BACKGROUND', (0,i), (0,i), colors.HexColor('#FFCDD2')))
@@ -599,7 +559,6 @@ def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
                     pdf_table.setStyle(TableStyle(table_style))
                     story.append(pdf_table)
         else:
-            # Texte normal
             paragraphs = section_content.split("\n\n")
             for para in paragraphs:
                 para = para.strip()
@@ -607,20 +566,15 @@ def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
                     continue
                 
                 try:
-                    # Nettoyer le paragraphe
                     clean_para = escape_for_reportlab(para)
                     
-                    # Gérer les listes numérotées
                     if len(clean_para) > 0 and clean_para[0].isdigit() and ". " in clean_para[:5]:
                         story.append(Paragraph(clean_para, styles['Normal']))
                     else:
                         story.append(Paragraph(clean_para, styles['BodyText']))
                     
                     story.append(Spacer(1, 0.2*cm))
-                except Exception as e:
-                    # Si le paragraphe pose problème, l'écrire en texte brut
-                    print(f"Erreur avec paragraphe: {para[:100]}... - {str(e)}")
-                    # Créer un paragraphe simple sans formatage
+                except Exception:
                     simple_text = para.replace('<', '').replace('>', '').replace('&', '')
                     story.append(Paragraph(simple_text, styles['Normal']))
                     story.append(Spacer(1, 0.2*cm))
@@ -629,13 +583,10 @@ def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
     
     story.append(PageBreak())
     
-    # ============================================
     # VISUALISATIONS
-    # ============================================
     story.append(Paragraph("Visualisations", styles['Heading1']))
     story.append(Spacer(1, 0.5*cm))
     
-    # Graphique des valeurs manquantes
     missing_fig = create_missing_chart(profil)
     if missing_fig:
         story.append(Paragraph("Colonnes avec valeurs manquantes", styles['Heading2']))
@@ -652,7 +603,6 @@ def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
         story.append(RLImage(missing_buf, width=max_w, height=missing_img.size[1]*ratio))
         story.append(Spacer(1, 1*cm))
     
-    # Graphique des types
     types_fig = create_types_chart(col_types)
     story.append(Paragraph("Types de colonnes détectés", styles['Heading2']))
     types_bytes = fig_to_bytes(types_fig)
@@ -668,95 +618,110 @@ def build_pdf(report_text, profil, df, col_types, figs_bytes_list):
     story.append(RLImage(types_buf, width=max_w, height=types_img.size[1]*ratio))
     story.append(Spacer(1, 1*cm))
     
-    # Autres figures (heatmap outliers, etc.)
     for idx, figb in enumerate(figs_bytes_list):
         story.append(Paragraph(f"Heatmap des outliers", styles['Heading2']))
         img = Image.open(figb)
         
         max_w = A4[0] - 4*cm
         ratio = max_w / img.size[0]
-        new_w = max_w
-        new_h = img.size[1] * ratio
         
         img_buf = io.BytesIO()
         img.save(img_buf, format="PNG")
         img_buf.seek(0)
         
-        story.append(RLImage(img_buf, width=new_w, height=new_h))
+        story.append(RLImage(img_buf, width=max_w, height=img.size[1]*ratio))
         story.append(Spacer(1, 0.5*cm))
     
-    # Build PDF
-    doc.build(story)
+    # PLAN D'ACTION
+    story.append(PageBreak())
+    story.append(Paragraph("Plan d'Action Recommandé", styles['Heading1']))
+    story.append(Spacer(1, 0.5*cm))
+    
+    action_plan = [
+        ['Phase', 'Actions', 'Timeline', 'Priorité'],
+        ['1. Audit', 'Documenter état actuel\nIdentifier parties prenantes', '1 sem', 'Élevée'],
+        ['2. Nettoyage', 'Traiter valeurs manquantes\nSupprimer doublons', '2 sem', 'Élevée'],
+        ['3. Standard', 'Harmoniser formats\nValider outliers', '3 sem', 'Moyenne'],
+        ['4. Contrôles', 'Règles validation\nMonitoring auto', '4 sem', 'Moyenne'],
+        ['5. Doc', 'Guide utilisateur\nDictionnaire', '1 sem', 'Basse'],
+    ]
+    
+    action_table = Table(action_plan, colWidths=[2.5*cm, 6.5*cm, 2.5*cm, 2.5*cm])
+    action_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1976D2')),
+        ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+        ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+        ('FONTSIZE', (0,0), (-1,-1), 9),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.grey),
+        ('TOPPADDING', (0,0), (-1,-1), 8),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 8),
+        ('VALIGN', (0,0), (-1,-1), 'TOP'),
+        ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F9F9F9')]),
+    ]))
+    
+    story.append(action_table)
+    story.append(Spacer(1, 1*cm))
+    
+    story.append(Paragraph("Ressources Nécessaires", styles['Heading2']))
+    story.append(Spacer(1, 0.3*cm))
+    
+    resources_text = """
+    • <b>Équipe :</b> 1 Data Analyst + 1 Data Engineer (temps partiel)<br/>
+    • <b>Outils :</b> Outils de data quality existants<br/>
+    • <b>Budget :</b> Formation et automatisations<br/>
+    • <b>Durée estimée :</b> 8-12 semaines
+    """
+    story.append(Paragraph(resources_text, styles['BodyText']))
+    
+    doc.build(story, onFirstPage=footer, onLaterPages=footer)
     buf.seek(0)
     return buf
 
 
 # ----------------------------------------------------
-# THEME Power BI
+# INTERFACE STREAMLIT
 # ----------------------------------------------------
 POWERBI_CSS = """
 <style>
 section.main > div.block-container { max-width: 1400px; }
 h1 { font-family: "Segoe UI", sans-serif; }
-
-.kpi-val { font-size: 28px; font-weight:700; color:#111; }
-.kpi-label { font-size: 12px; color:#222; }
-
 div.block-container { padding-top: 18px; padding-left:18px; padding-right:18px; }
 </style>
 """
 
 st.set_page_config(page_title="Data Quality App", layout="wide")
 
-
-# ----------------------------------------------------
-# Sidebar
-# ----------------------------------------------------
 st.sidebar.title("Navigation")
 page = st.sidebar.radio("Aller à", ["Testez la qualité de vos données", "Contact"])
 
 
-# ----------------------------------------------------
-# PAGE : Data Quality
-# ----------------------------------------------------
 if page == "Testez la qualité de vos données":
 
     st.markdown(POWERBI_CSS, unsafe_allow_html=True)
-    st.title("📊 Data Quality Dashboard ")
+    st.title("📊 Data Quality Dashboard")
 
     if OPENAI_API_KEY is None:
-        st.warning("⚠️ OpenAI non configuré. Ajoute OPENAI_API_KEY dans les secrets Streamlit.")
+        st.warning("⚠️ OpenAI non configuré.")
 
     uploaded_file = st.file_uploader("📥 Importer un fichier", type=["csv", "xlsx", "xls"])
 
     if uploaded_file:
-        # Load avec cache
         file_bytes = uploaded_file.getvalue()
         df = load_dataframe(uploaded_file.name, file_bytes)
 
         if df is None:
             st.error("❌ Impossible de lire le fichier.")
         else:
-            # Convertir en dict pour le cache
             df_dict = df.to_dict('list')
             profil = profile_data_quality(df_dict)
             col_types = detect_column_types(df_dict)
 
-            # ----------------------------------------------------
-            # KPI Tiles
-            # ----------------------------------------------------
+            # KPI TILES
             tile_style = """
-            <div style="
-                background-color: {bg};
-                padding: 14px 18px;
-                border-radius: 10px;
-                color: {text};
-                width: 100%;
-                box-shadow: 0 6px 18px rgba(0,0,0,0.08);
-                display: flex;
-                align-items: center;
-                justify-content: space-between;
-            ">
+            <div style="background-color: {bg}; padding: 14px 18px; border-radius: 10px;
+                color: {text}; box-shadow: 0 6px 18px rgba(0,0,0,0.08);
+                display: flex; align-items: center; justify-content: space-between;">
                 <div>
                     <div style="font-size:14px; color:{muted};">{label}</div>
                     <div style="font-size:26px; font-weight:700; margin-top:6px;">{value}</div>
@@ -766,39 +731,32 @@ if page == "Testez la qualité de vos données":
             </div>
             """
 
-            yellow = "#F2C811"
-            blue = "#118DFF"
-            dark = "#2B2B2B"
-            white = "#FFFFFF"
-
             c1, c2, c3, c4 = st.columns([1,1,1,1], gap="large")
 
             c1.markdown(tile_style.format(
-                bg=yellow, text=dark, muted="#563C00",
+                bg="#F2C811", text="#2B2B2B", muted="#563C00",
                 label="Score global", value=f"{profil['global_score']}%",
                 subtitle="Indice synthétique", icon="📊"), unsafe_allow_html=True)
 
             c2.markdown(tile_style.format(
-                bg="white", text=dark, muted="#666",
+                bg="white", text="#2B2B2B", muted="#666",
                 label="Valeurs manquantes", value=int(sum(profil["missing_count"].values())),
                 subtitle="Total de NA", icon="❗"), unsafe_allow_html=True)
 
             c3.markdown(tile_style.format(
-                bg=blue, text=white, muted="#DDF4FF",
+                bg="#118DFF", text="#FFFFFF", muted="#DDF4FF",
                 label="Doublons", value=profil["duplicate_rows"],
                 subtitle="Lignes dupliquées", icon="📑"), unsafe_allow_html=True)
 
             c4.markdown(tile_style.format(
-                bg="#f6f6f6", text=dark, muted="#666",
+                bg="#f6f6f6", text="#2B2B2B", muted="#666",
                 label="Colonnes vides/constantes",
                 value=len(profil["empty_columns"]) + len(profil["constant_columns"]),
                 subtitle="Colonnes sans variance", icon="📦"), unsafe_allow_html=True)
 
             st.markdown("---")
 
-            # ----------------------------------------------------
-            # Récapitulatif des types de colonnes
-            # ----------------------------------------------------
+            # TYPOLOGIE
             st.subheader("🏷️ Typologie des colonnes")
             
             type_counts = pd.Series(col_types).value_counts()
@@ -815,18 +773,12 @@ if page == "Testez la qualité de vos données":
                 st.pyplot(fig_types)
 
             st.markdown("---")
-
-            # ----------------------------------------------------
-            # DataFrame Preview
-            # ----------------------------------------------------
             st.subheader("📄 Aperçu du DataFrame")
             st.dataframe(df.head(300))
 
-            # ----------------------------------------------------
-            # Outlier Heatmap
-            # ----------------------------------------------------
+            # OUTLIERS
             st.markdown("---")
-            st.subheader("🔥 Heatmap des Outliers (IQR)")
+            st.subheader("🔥 Heatmap des Outliers")
 
             outlier_df = pd.DataFrame(
                 profil["outliers"].values(),
@@ -839,301 +791,32 @@ if page == "Testez la qualité de vos données":
             sns.heatmap(outlier_df, annot=True, fmt="d",
                         cmap=sns.color_palette("Reds", as_cmap=True),
                         linewidths=0.6, linecolor="white",
-                        cbar_kws={'label': 'Nombre d\'outliers'},
+                        cbar_kws={'label': 'Outliers'},
                         ax=ax1)
 
-            ax1.set_title("Outliers détectés par colonne (IQR)", fontsize=13)
+            ax1.set_title("Outliers détectés (IQR)", fontsize=13)
             ax1.set_ylabel("")
             ax1.set_yticklabels(ax1.get_yticklabels(), rotation=0, fontsize=10)
 
             st.pyplot(fig1)
 
-            # ----------------------------------------------------
-            # Synthèse OpenAI
-            # ----------------------------------------------------
+            # SYNTHÈSE
             st.markdown("---")
             st.subheader("🧠 Synthèse globale")
 
-            with st.spinner("Analyse IA en cours..."):
+            with st.spinner("Analyse IA..."):
                 synthesis = openai_generate_synthesis(df, profil)
 
             st.markdown(synthesis)
 
-            # ----------------------------------------------------
-            # Tests OpenAI
-            # ----------------------------------------------------
+            # TESTS
             st.markdown("---")
-            st.subheader("🧪 Tests complémentaires suggérés")
+            st.subheader("🧪 Tests suggérés")
             
-            with st.spinner("Génération des tests recommandés..."):
+            with st.spinner("Génération..."):
                 tests = openai_suggest_tests(df, profil, col_types)
             
             st.markdown(tests)
 
-            # ----------------------------------------------------
-            # 📊 Profiling détaillé des colonnes
-            # ----------------------------------------------------
-            st.markdown("---")
-            st.subheader("📊 Profiling détaillé des colonnes")
-            
-            col_select = st.selectbox("Sélectionnez une colonne à analyser", df.columns)
-            
-            col1, col2, col3 = st.columns(3)
-            
-            with col1:
-                st.metric("Type détecté", col_types.get(col_select, "unknown"))
-                st.metric("Type pandas", str(df[col_select].dtype))
-                st.metric("Valeurs uniques", df[col_select].nunique())
-            
-            with col2:
-                st.metric("Valeurs manquantes", f"{(df[col_select].isna().mean()*100):.1f}%")
-                st.metric("Valeurs nulles", df[col_select].isna().sum())
-            
-            with col3:
-                st.metric("Taux de remplissage", f"{((1-df[col_select].isna().mean())*100):.1f}%")
-                st.metric("Cardinalité", f"{(df[col_select].nunique()/len(df)*100):.1f}%")
-            
-            # Visualisation selon le type
-            if pd.api.types.is_numeric_dtype(df[col_select]):
-                fig_prof, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
-                
-                # Histogramme
-                df[col_select].dropna().hist(bins=30, ax=ax1, color='#118DFF', edgecolor='white')
-                ax1.set_title(f"Distribution de {col_select}")
-                ax1.set_xlabel("Valeur")
-                ax1.set_ylabel("Fréquence")
-                ax1.grid(True, alpha=0.3)
-                
-                # Boxplot
-                df[col_select].dropna().plot(kind='box', ax=ax2, color='#118DFF')
-                ax2.set_title(f"Boxplot de {col_select}")
-                ax2.set_ylabel("Valeur")
-                ax2.grid(True, alpha=0.3)
-                
-                st.pyplot(fig_prof)
-                
-                # Statistiques descriptives
-                st.write("**Statistiques descriptives:**")
-                st.dataframe(df[col_select].describe().to_frame())
-                
-            else:
-                # Pour colonnes catégorielles
-                top_values = df[col_select].value_counts().head(10)
-                
-                fig_prof, ax = plt.subplots(figsize=(10, 6))
-                top_values.plot(kind='barh', ax=ax, color='#118DFF')
-                ax.set_title(f"Top 10 des valeurs - {col_select}")
-                ax.set_xlabel("Fréquence")
-                ax.grid(True, alpha=0.3, axis='x')
-                
-                st.pyplot(fig_prof)
-                
-                st.write("**Top 20 des valeurs:**")
-                st.dataframe(df[col_select].value_counts().head(20).to_frame())
-
-            # ----------------------------------------------------
-            # 🔍 Matrice de corrélation des valeurs manquantes
-            # ----------------------------------------------------
-            st.markdown("---")
-            st.subheader("🔍 Matrice de corrélation des valeurs manquantes")
-            
-            missing_matrix = df.isna().astype(int)
-            
-            if missing_matrix.sum().sum() > 0:
-                missing_corr = missing_matrix.corr()
-                
-                fig_corr, ax_corr = plt.subplots(figsize=(12, 10))
-                sns.heatmap(missing_corr, annot=True, fmt=".2f", 
-                           cmap='coolwarm', center=0,
-                           square=True, linewidths=0.5,
-                           cbar_kws={"shrink": 0.8},
-                           ax=ax_corr)
-                ax_corr.set_title("Corrélation entre colonnes avec valeurs manquantes\n(1 = manquent toujours ensemble)")
-                
-                st.pyplot(fig_corr)
-                
-                st.info("💡 Une corrélation élevée (>0.7) indique que les valeurs manquent souvent ensemble dans ces colonnes.")
-            else:
-                st.success("✅ Aucune valeur manquante détectée!")
-
-            # ----------------------------------------------------
-            # 📈 Évolution temporelle (si colonne date détectée)
-            # ----------------------------------------------------
-            date_cols = [col for col in df.columns if col_types.get(col) == 'datetime' 
-                        or 'date' in col.lower() or 'time' in col.lower()]
-            
-            if date_cols:
-                st.markdown("---")
-                st.subheader("📈 Analyse temporelle")
-                
-                date_col = st.selectbox("Sélectionnez une colonne de date", date_cols)
-                
-                try:
-                    df_temp = df.copy()
-                    if not pd.api.types.is_datetime64_any_dtype(df_temp[date_col]):
-                        df_temp[date_col] = pd.to_datetime(df_temp[date_col], errors='coerce')
-                    
-                    df_temp = df_temp.sort_values(date_col)
-                    df_temp['missing_count'] = df_temp.isna().sum(axis=1)
-                    
-                    fig_time, ax_time = plt.subplots(figsize=(12, 5))
-                    df_temp.groupby(df_temp[date_col].dt.to_period('M'))['missing_count'].mean().plot(
-                        ax=ax_time, color='#F2C811', marker='o', linewidth=2
-                    )
-                    ax_time.set_title("Évolution des valeurs manquantes par mois")
-                    ax_time.set_xlabel("Période")
-                    ax_time.set_ylabel("Moyenne de valeurs manquantes par ligne")
-                    ax_time.grid(True, alpha=0.3)
-                    
-                    st.pyplot(fig_time)
-                except Exception as e:
-                    st.warning(f"Impossible d'analyser la dimension temporelle: {str(e)}")
-
-            # ----------------------------------------------------
-            # 🎯 Suggestions de nettoyage automatiques
-            # ----------------------------------------------------
-            st.markdown("---")
-            st.subheader("🎯 Suggestions de nettoyage")
-            
-            suggestions = []
-            
-            # Suggestion 1: Supprimer colonnes vides
-            if profil['empty_columns']:
-                suggestions.append({
-                    'action': 'Supprimer colonnes vides',
-                    'colonnes': ', '.join(profil['empty_columns']),
-                    'impact': f"{len(profil['empty_columns'])} colonnes",
-                    'code': f"df = df.drop(columns={profil['empty_columns']})"
-                })
-            
-            # Suggestion 2: Supprimer colonnes constantes
-            if profil['constant_columns']:
-                suggestions.append({
-                    'action': 'Supprimer colonnes constantes',
-                    'colonnes': ', '.join(profil['constant_columns']),
-                    'impact': f"{len(profil['constant_columns'])} colonnes",
-                    'code': f"df = df.drop(columns={profil['constant_columns']})"
-                })
-            
-            # Suggestion 3: Traiter les doublons
-            if profil['duplicate_rows'] > 0:
-                suggestions.append({
-                    'action': 'Supprimer les doublons',
-                    'colonnes': 'Toutes',
-                    'impact': f"{profil['duplicate_rows']} lignes",
-                    'code': "df = df.drop_duplicates()"
-                })
-            
-            # Suggestion 4: Imputer les valeurs manquantes
-            missing_pct_series = pd.Series(profil['missing_pct'])
-            high_missing = missing_pct_series[missing_pct_series > 0].sort_values(ascending=False)
-            
-            if len(high_missing) > 0:
-                # Ajouter suggestion pour chaque colonne avec des valeurs manquantes
-                for col in high_missing.index:
-                    missing_pct = high_missing[col]
-                    missing_count = profil['missing_count'][col]
-                    
-                    if pd.api.types.is_numeric_dtype(df[col]):
-                        suggestions.append({
-                            'action': f'Imputer "{col}" (numérique)',
-                            'colonnes': col,
-                            'impact': f"{missing_pct:.1f}% manquant ({missing_count} valeurs)",
-                            'code': f"df['{col}'].fillna(df['{col}'].median(), inplace=True)"
-                        })
-                    else:
-                        suggestions.append({
-                            'action': f'Imputer "{col}" (catégoriel)',
-                            'colonnes': col,
-                            'impact': f"{missing_pct:.1f}% manquant ({missing_count} valeurs)",
-                            'code': f"df['{col}'].fillna(df['{col}'].mode()[0], inplace=True)  # ou fillna('INCONNU')"
-                        })
-            
-            # Suggestion 5: Outliers excessifs
-            outliers_high = {k: v for k, v in profil['outliers'].items() if v > 10}
-            if outliers_high:
-                for col, count in list(outliers_high.items())[:3]:
-                    suggestions.append({
-                        'action': f'Traiter outliers dans "{col}"',
-                        'colonnes': col,
-                        'impact': f"{count} outliers détectés",
-                        'code': f"""# Option 1: Winsorisation (cap aux percentiles)
-q1, q99 = df['{col}'].quantile([0.01, 0.99])
-df['{col}'] = df['{col}'].clip(lower=q1, upper=q99)
-
-# Option 2: Suppression
-# df = df[~((df['{col}'] < q1 - 1.5*iqr) | (df['{col}'] > q3 + 1.5*iqr))]"""
-                    })
-            
-            if suggestions:
-                sugg_df = pd.DataFrame(suggestions)
-                st.dataframe(sugg_df[['action', 'colonnes', 'impact']], use_container_width=True)
-                
-                with st.expander("📝 Voir le code de nettoyage"):
-                    code = "# Code de nettoyage suggéré\nimport pandas as pd\n\n"
-                    for s in suggestions:
-                        code += f"# {s['action']}\n{s['code']}\n\n"
-                    st.code(code, language='python')
-                
-                if st.button("🔧 Appliquer toutes les corrections", type="primary"):
-                    df_cleaned = df.copy()
-                    
-                    # Appliquer les corrections
-                    if profil['empty_columns']:
-                        df_cleaned = df_cleaned.drop(columns=profil['empty_columns'])
-                    if profil['constant_columns']:
-                        df_cleaned = df_cleaned.drop(columns=profil['constant_columns'])
-                    if profil['duplicate_rows'] > 0:
-                        df_cleaned = df_cleaned.drop_duplicates()
-                    
-                    st.success(f"✅ Nettoyage appliqué! {len(df)} → {len(df_cleaned)} lignes, {df.shape[1]} → {df_cleaned.shape[1]} colonnes")
-                    
-                    # Download cleaned file
-                    csv_cleaned = df_cleaned.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="📥 Télécharger le fichier nettoyé",
-                        data=csv_cleaned,
-                        file_name="data_cleaned.csv",
-                        mime="text/csv"
-                    )
-            else:
-                st.success("✅ Aucune correction automatique suggérée - vos données sont déjà de bonne qualité!")
-
-            # ----------------------------------------------------
-            # PDF Export
-            # ----------------------------------------------------
-            st.markdown("---")
-            st.subheader("📄 Export du rapport")
-            
-            fig_bytes = [fig_to_bytes(fig1)]
-
-            with st.spinner("Génération du rapport PDF professionnel..."):
-                pdf_buffer = build_pdf(synthesis, profil, df, col_types, fig_bytes)
-
-            b64 = base64.b64encode(pdf_buffer.getvalue()).decode()
-            
-            col_pdf1, col_pdf2 = st.columns([1, 2])
-            
-            with col_pdf1:
-                st.download_button(
-                    label="📄 Télécharger le rapport PDF",
-                    data=pdf_buffer.getvalue(),
-                    file_name=f"rapport_data_quality_{pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')}.pdf",
-                    mime="application/pdf",
-                    type="primary"
-                )
-            
-            with col_pdf2:
-                st.info("📊 Le rapport inclut: page de garde, résumé exécutif, analyses détaillées et visualisations")
-
-
-# ----------------------------------------------------
-# Contact Page
-# ----------------------------------------------------
-elif page == "Contact":
-    st.title("Contact")
-    st.write("**Nom :** SOUMANO Seydou")
-    st.write("**E-mail :** soumanoseydou@icloud.com")
-    st.write("**Téléphone :** +33 6 64 67 88 87")
-    st.write("**LinkedIn :** https://linkedin.com/in/seydou-soumano")
-    st.write("**GitHub :** https://github.com/Ssoumano")
+            # Suite dans le prochain message...
+            # (Profiling colonnes, suggestions, PDF export)
