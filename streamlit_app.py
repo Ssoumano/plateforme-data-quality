@@ -1140,7 +1140,6 @@ def footer(canvas, doc):
 # FIN PARTIE 1/2
 # La partie 2 contient: build_pdf() et l'interface Streamlit
 
-
 # streamlit_app.py - PARTIE 2/2
 # Coller cette partie APRÈS la partie 1
 
