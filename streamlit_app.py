@@ -380,7 +380,6 @@ def footer(canvas, doc):
 # La partie 2 contient: build_pdf() et l'interface Streamlit
 
 
-
 # streamlit_app.py - PARTIE 2/2
 # Coller cette partie APRÈS la partie 1
 
@@ -785,25 +784,29 @@ if page == "Testez la qualité de vos données":
             st.markdown("---")
             st.subheader("🔥 Heatmap des Outliers")
 
-            outlier_df = pd.DataFrame(
-                profil["outliers"].values(),
-                index=profil["outliers"].keys(),
-                columns=["outliers"]
-            ).sort_values("outliers", ascending=False)
+            if profil["outliers"] and sum(profil["outliers"].values()) > 0:
+                outlier_df = pd.DataFrame(
+                    profil["outliers"].values(),
+                    index=profil["outliers"].keys(),
+                    columns=["outliers"]
+                ).sort_values("outliers", ascending=False)
 
-            fig1, ax1 = plt.subplots(figsize=(8, max(2, len(outlier_df)*0.35)))
+                fig1, ax1 = plt.subplots(figsize=(8, max(2, len(outlier_df)*0.35)))
 
-            sns.heatmap(outlier_df, annot=True, fmt="d",
-                        cmap=sns.color_palette("Reds", as_cmap=True),
-                        linewidths=0.6, linecolor="white",
-                        cbar_kws={'label': 'Outliers'},
-                        ax=ax1)
+                sns.heatmap(outlier_df, annot=True, fmt="d",
+                            cmap=sns.color_palette("Reds", as_cmap=True),
+                            linewidths=0.6, linecolor="white",
+                            cbar_kws={'label': 'Outliers'},
+                            ax=ax1)
 
-            ax1.set_title("Outliers détectés (IQR)", fontsize=13)
-            ax1.set_ylabel("")
-            ax1.set_yticklabels(ax1.get_yticklabels(), rotation=0, fontsize=10)
+                ax1.set_title("Outliers détectés (IQR)", fontsize=13)
+                ax1.set_ylabel("")
+                ax1.set_yticklabels(ax1.get_yticklabels(), rotation=0, fontsize=10)
 
-            st.pyplot(fig1)
+                st.pyplot(fig1)
+            else:
+                st.info("✅ Aucun outlier détecté ou aucune colonne numérique dans le dataset.")
+                fig1 = None
 
             # SYNTHÈSE
             st.markdown("---")
@@ -825,3 +828,119 @@ if page == "Testez la qualité de vos données":
 
             # Suite dans le prochain message...
             # (Profiling colonnes, suggestions, PDF export)
+
+            # PROFILING COLONNES
+            st.markdown("---")
+            st.subheader("📊 Profiling détaillé")
+            
+            col_select = st.selectbox("Colonne", df.columns)
+            
+            col1, col2, col3 = st.columns(3)
+            
+            with col1:
+                st.metric("Type", col_types.get(col_select, "unknown"))
+                st.metric("Pandas", str(df[col_select].dtype))
+            
+            with col2:
+                st.metric("Manquantes", f"{(df[col_select].isna().mean()*100):.1f}%")
+                st.metric("Uniques", df[col_select].nunique())
+            
+            with col3:
+                st.metric("Remplissage", f"{((1-df[col_select].isna().mean())*100):.1f}%")
+                st.metric("Cardinalité", f"{(df[col_select].nunique()/len(df)*100):.1f}%")
+            
+            if pd.api.types.is_numeric_dtype(df[col_select]):
+                fig_prof, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 4))
+                df[col_select].dropna().hist(bins=30, ax=ax1, color='#118DFF')
+                ax1.set_title(f"Distribution")
+                ax1.grid(True, alpha=0.3)
+                
+                df[col_select].dropna().plot(kind='box', ax=ax2, color='#118DFF')
+                ax2.set_title(f"Boxplot")
+                ax2.grid(True, alpha=0.3)
+                
+                st.pyplot(fig_prof)
+                st.dataframe(df[col_select].describe().to_frame())
+            else:
+                top_values = df[col_select].value_counts().head(10)
+                fig_prof, ax = plt.subplots(figsize=(10, 5))
+                top_values.plot(kind='barh', ax=ax, color='#118DFF')
+                ax.set_title(f"Top 10")
+                ax.grid(True, alpha=0.3, axis='x')
+                st.pyplot(fig_prof)
+                st.dataframe(df[col_select].value_counts().head(20))
+
+            # SUGGESTIONS
+            st.markdown("---")
+            st.subheader("🎯 Suggestions")
+            
+            suggestions = []
+            
+            if profil['empty_columns']:
+                suggestions.append({
+                    'action': 'Supprimer vides',
+                    'colonnes': ', '.join(profil['empty_columns'][:3]),
+                    'impact': f"{len(profil['empty_columns'])} col",
+                    'code': f"df.drop(columns={profil['empty_columns']})"
+                })
+            
+            if profil['duplicate_rows'] > 0:
+                suggestions.append({
+                    'action': 'Supprimer doublons',
+                    'colonnes': 'Toutes',
+                    'impact': f"{profil['duplicate_rows']} lignes",
+                    'code': "df.drop_duplicates()"
+                })
+            
+            missing_pct_series = pd.Series(profil['missing_pct'])
+            high_missing = missing_pct_series[missing_pct_series > 0].sort_values(ascending=False)
+            
+            for col in high_missing.head(5).index:
+                missing_pct = high_missing[col]
+                suggestions.append({
+                    'action': f'Imputer {col}',
+                    'colonnes': col,
+                    'impact': f"{missing_pct:.1f}%",
+                    'code': f"df['{col}'].fillna(df['{col}'].median())"
+                })
+            
+            if suggestions:
+                sugg_df = pd.DataFrame(suggestions)
+                st.dataframe(sugg_df, use_container_width=True)
+                
+                with st.expander("📝 Code"):
+                    code = "import pandas as pd\n\n"
+                    for s in suggestions:
+                        code += f"# {s['action']}\n{s['code']}\n\n"
+                    st.code(code, language='python')
+            else:
+                st.success("✅ Données OK!")
+
+            # PDF EXPORT
+            st.markdown("---")
+            st.subheader("📄 Export PDF")
+            
+            if fig1 is not None:
+                fig_bytes = [fig_to_bytes(fig1)]
+            else:
+                fig_bytes = []
+
+            with st.spinner("PDF..."):
+                pdf_buffer = build_pdf(synthesis, profil, df, col_types, fig_bytes)
+
+            st.download_button(
+                label="📄 Télécharger PDF",
+                data=pdf_buffer.getvalue(),
+                file_name=f"rapport_{datetime.now().strftime('%Y%m%d_%H%M')}.pdf",
+                mime="application/pdf",
+                type="primary"
+            )
+
+
+elif page == "Contact":
+    st.title("Contact")
+    st.write("**Nom :** SOUMANO Seydou")
+    st.write("**Email :** soumanoseydou@icloud.com")
+    st.write("**Tel :** +33 6 64 67 88 87")
+    st.write("**LinkedIn :** linkedin.com/in/seydou-soumano")
+    st.write("**GitHub :** github.com/Ssoumano")
