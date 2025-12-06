@@ -157,11 +157,9 @@ def profile_data_quality(df_dict) -> dict:
         outliers[col] = int(((x < q1 - 1.5 * iqr) | (x > q3 + 1.5 * iqr)).sum())
     profil['outliers'] = outliers
 
-    # ========================================
+ # ========================================
     # NOUVEAU : Détection d'incohérences
     # ========================================
-    import re
-    
     incoherence_issues = []
     incoherence_count = 0
     
@@ -172,10 +170,80 @@ def profile_data_quality(df_dict) -> dict:
         if len(sample_values) == 0:
             continue
         
-        # Détection code postal dans mauvaise colonne
-        if 'code' in col_lower and 'postal' in col_lower:
-            # Vérifier que ce sont bien des codes postaux (5 chiffres en France)
-            non_valid = sample_values[~sample_values.str.match(r'^\d{5}
+        # Détection code postal
+        if 'postal' in col_lower:
+            pattern = r'^\d{5}$'
+            invalid = sample_values[~sample_values.str.match(pattern, na=False)]
+            if len(invalid) > len(sample_values) * 0.2:
+                incoherence_count += len(invalid)
+                incoherence_issues.append({
+                    'colonne': col,
+                    'type': 'Code postal invalide',
+                    'count': len(invalid),
+                    'exemples': invalid.head(3).tolist()
+                })
+        
+        # Détection email
+        elif 'mail' in col_lower:
+            pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+            invalid = sample_values[~sample_values.str.match(pattern, na=False)]
+            if len(invalid) > len(sample_values) * 0.1:
+                incoherence_count += len(invalid)
+                incoherence_issues.append({
+                    'colonne': col,
+                    'type': 'Email invalide',
+                    'count': len(invalid),
+                    'exemples': invalid.head(3).tolist()
+                })
+        
+        # Détection nom avec chiffres
+        elif any(x in col_lower for x in ['nom', 'prenom', 'name']):
+            pattern = r'\d'
+            has_digits = sample_values.str.contains(pattern, na=False)
+            if has_digits.sum() > len(sample_values) * 0.05:
+                incoherence_count += has_digits.sum()
+                incoherence_issues.append({
+                    'colonne': col,
+                    'type': 'Nom contient des chiffres',
+                    'count': int(has_digits.sum()),
+                    'exemples': sample_values[has_digits].head(3).tolist()
+                })
+        
+        # Détection code avec texte
+        elif 'code' in col_lower and 'postal' not in col_lower:
+            if df[col].dtype == 'object':
+                pattern = r'[a-zA-Z]'
+                has_letters = sample_values.str.contains(pattern, na=False)
+                if has_letters.sum() > len(sample_values) * 0.1:
+                    incoherence_count += has_letters.sum()
+                    incoherence_issues.append({
+                        'colonne': col,
+                        'type': 'Code contient du texte',
+                        'count': int(has_letters.sum()),
+                        'exemples': sample_values[has_letters].head(3).tolist()
+                    })
+    
+    profil['incoherence_issues'] = incoherence_issues
+    profil['incoherence_count'] = incoherence_count
+
+    # Score global AMÉLIORÉ
+    missing_mean = pd.Series(profil['missing_pct']).mean() if profil['missing_pct'] else 0
+    miss_score = max(0, 100 - missing_mean)
+    dup_score = max(0, 100 - (profil["duplicate_rows"]/max(1, profil["rows"])) * 100)
+    out_score = max(0, 100 - (np.mean(list(outliers.values())) if outliers else 0))
+    
+    # Score de cohérence
+    coherence_pct = (incoherence_count / max(1, profil["rows"])) * 100
+    coherence_score = max(0, 100 - coherence_pct)
+    
+    # Pondération: 40% complétude, 20% unicité, 15% outliers, 25% cohérence
+    profil["global_score"] = round(
+        (miss_score * 0.40 + dup_score * 0.20 + out_score * 0.15 + coherence_score * 0.25), 
+        1
+    )
+    profil["coherence_score"] = round(coherence_score, 1)
+
+    return profil
 
 
 # ----------------------------------------------------
@@ -1722,3 +1790,4 @@ elif page == "Contact":
     st.write("**Tel :** +33 6 64 67 88 87")
     st.write("**LinkedIn :** linkedin.com/in/seydou-soumano")
     st.write("**GitHub :** github.com/Ssoumano")
+
