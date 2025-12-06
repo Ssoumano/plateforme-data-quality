@@ -1520,6 +1520,22 @@ if page == "Testez la qualité de vos données":
                 subtitle="Colonnes sans variance", icon="📦"), unsafe_allow_html=True)
 
             st.markdown("---")
+            
+            # ========================================
+            # NOUVEAU : Affichage des incohérences
+            # ========================================
+            if profil.get('incoherence_count', 0) > 0:
+                st.warning(f"⚠️ **{profil['incoherence_count']} incohérences détectées** (Score cohérence : {profil.get('coherence_score', 100)}%)")
+                
+                with st.expander("🔍 Détails des incohérences", expanded=True):
+                    for issue in profil['incoherence_issues']:
+                        st.error(f"**{issue['colonne']}** : {issue['type']} ({issue['count']} valeurs)")
+                        st.write(f"Exemples : {', '.join(map(str, issue['exemples']))}")
+                        st.write("---")
+                
+                st.info("💡 Ces incohérences réduisent votre score de qualité. Corrigez-les pour améliorer la fiabilité de vos données.")
+
+            st.markdown("---")
 
             # TYPOLOGIE
             st.subheader("🏷️ Typologie des colonnes")
