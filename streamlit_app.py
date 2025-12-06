@@ -121,11 +121,11 @@ def detect_column_types(df_dict):
 
 
 # ----------------------------------------------------
-# Data Profiling
+# Data Profiling avec détection de cohérence
 # ----------------------------------------------------
 @st.cache_data
 def profile_data_quality(df_dict) -> dict:
-    """Profile data quality with caching"""
+    """Profile data quality with caching and coherence checks"""
     df = pd.DataFrame(df_dict)
     
     profil = {}
@@ -145,6 +145,7 @@ def profile_data_quality(df_dict) -> dict:
     else:
         profil['numeric_stats'] = {}
 
+    # Outliers via IQR
     outliers = {}
     for col in numeric.columns:
         x = df[col].dropna()
@@ -156,11 +157,771 @@ def profile_data_quality(df_dict) -> dict:
         outliers[col] = int(((x < q1 - 1.5 * iqr) | (x > q3 + 1.5 * iqr)).sum())
     profil['outliers'] = outliers
 
+    # ========================================
+    # NOUVEAU : Détection d'incohérences
+    # ========================================
+    import re
+    
+    incoherence_issues = []
+    incoherence_count = 0
+    
+    for col in df.columns:
+        col_lower = col.lower()
+        sample_values = df[col].dropna().astype(str).head(100)
+        
+        if len(sample_values) == 0:
+            continue
+        
+        # Détection code postal dans mauvaise colonne
+        if 'code' in col_lower and 'postal' in col_lower:
+            # Vérifier que ce sont bien des codes postaux (5 chiffres en France)
+            non_valid = sample_values[~sample_values.str.match(r'^\d{5}
+
+
+# ----------------------------------------------------
+# OpenAI Reports
+# ----------------------------------------------------
+def openai_generate_synthesis(df, profil):
+    if client is None:
+        return "OpenAI non configuré."
+
+    schema = ""
+    for col in df.columns[:15]:
+        missing = profil['missing_pct'][col]
+        schema += f"- {col} ({profil['dtypes'][col]}): {missing:.1f}% manquant, {df[col].nunique()} valeurs uniques\n"
+
+    missing_mean = pd.Series(profil['missing_pct']).mean()
+    total_missing = sum(profil['missing_count'].values())
+    
+    top_missing = pd.Series(profil['missing_pct']).sort_values(ascending=False).head(5)
+    top_missing_str = "\n".join([f"  - {col}: {pct:.1f}%" for col, pct in top_missing.items()])
+    
+    prompt = f"""
+    Tu es consultant expert en Data Quality. Analyse ce dataset et fournis un rapport DÉTAILLÉ et STRUCTURÉ.
+
+    ## Données globales
+    - Lignes: {profil['rows']:,}
+    - Colonnes: {profil['cols']}
+    - Score global: {profil['global_score']}%
+    - Valeurs manquantes totales: {total_missing:,} ({missing_mean:.2f}% en moyenne)
+    - Doublons: {profil['duplicate_rows']}
+    - Colonnes constantes: {len(profil['constant_columns'])}
+    - Colonnes vides: {len(profil['empty_columns'])}
+
+    ## Top 5 colonnes avec valeurs manquantes
+{top_missing_str}
+
+    ## Outliers détectés (IQR)
+    {dict(list(profil['outliers'].items())[:5])}
+
+    ## Format attendu:
+
+    ### Synthèse Professionnelle
+    Rédige une analyse détaillée (15-20 lignes) couvrant:
+    - État général du dataset
+    - Problématiques majeures avec impact business
+    - Risques pour les analyses
+    - Axes d'amélioration prioritaires
+
+    ### Tableau de Priorisation
+    Format MARKDOWN:
+    
+    | Priorité | Problème | Colonnes | Recommandation |
+    |----------|----------|----------|----------------|
+    | Élevée | [problème] | [colonnes] | [action] |
+    
+    IMPORTANT:
+    - Colonne "Colonnes": MAX 20 caractères
+    - Colonne "Recommandation": MAX 60 caractères
+    - 5-8 lignes
+
+    ### 5 Quick Wins
+    1. **[Titre]**: Description (MAX 100 caractères).
+    """
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Tu es un consultant senior expert en qualité des données."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=3500,
+        temperature=0.2
+    )
+
+    return clean_ai_text(resp.choices[0].message.content)
+
+
+def openai_suggest_tests(df, profil, col_types):
+    if client is None:
+        return "OpenAI non configuré."
+
+    schema = ""
+    for col in df.columns[:15]:
+        col_type = col_types.get(col, "unknown")
+        missing = profil['missing_pct'][col]
+        unique = df[col].nunique()
+        schema += f"- {col} ({col_type}): {missing:.1f}% manquant, {unique} uniques\n"
+
+    prompt = f"""
+    Expert en data quality testing.
+    
+    Dataset:
+{schema}
+
+    Propose 8-12 tests SPÉCIFIQUES.
+    
+    Format:
+    ## [N]. [Nom]
+    **Objectif:** [Pourquoi]
+    **Colonnes:** [Colonnes]
+    **Méthode:** [Comment]
+    **Critère:** [Seuil]
+    """
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Expert en data quality testing."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=2500,
+        temperature=0.2
+    )
+
+    return clean_ai_text(resp.choices[0].message.content)
+
+
+# ----------------------------------------------------
+# PDF Generation - Fonctions graphiques
+# ----------------------------------------------------
+def fig_to_bytes(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches='tight', dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def create_gauge_chart(score):
+    fig, ax = plt.subplots(figsize=(6, 3))
+    
+    if score >= 80:
+        color = '#4CAF50'
+    elif score >= 60:
+        color = '#FFC107'
+    else:
+        color = '#F44336'
+    
+    from matplotlib.patches import Wedge
+    wedge_bg = Wedge((0.5, 0), 0.4, 0, 180, width=0.15, facecolor='#E0E0E0', edgecolor='white', linewidth=2)
+    ax.add_patch(wedge_bg)
+    
+    angle = score * 1.8
+    wedge_score = Wedge((0.5, 0), 0.4, 0, angle, width=0.15, facecolor=color, edgecolor='white', linewidth=2)
+    ax.add_patch(wedge_score)
+    
+    ax.text(0.5, 0.15, f"{score}%", ha='center', va='center', fontsize=32, fontweight='bold', color=color)
+    ax.text(0.5, -0.05, "Score Global", ha='center', va='center', fontsize=12, color='#666')
+    
+    ax.set_xlim(0, 1)
+    ax.set_ylim(-0.1, 0.5)
+    ax.axis('off')
+    
+    return fig
+
+
+def create_missing_chart(profil):
+    missing_data = pd.Series(profil['missing_pct']).sort_values(ascending=False).head(10)
+    
+    if missing_data.empty or missing_data.sum() == 0:
+        return None
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    colors_list = ['#F44336' if x > 50 else '#FFC107' if x > 20 else '#4CAF50' for x in missing_data.values]
+    
+    missing_data.plot(kind='barh', ax=ax, color=colors_list, edgecolor='white', linewidth=1.5)
+    ax.set_xlabel("Pourcentage de valeurs manquantes (%)", fontsize=11)
+    ax.set_ylabel("")
+    ax.set_title("Top 10 des colonnes avec valeurs manquantes", fontsize=13, fontweight='bold', pad=15)
+    ax.grid(axis='x', alpha=0.3, linestyle='--')
+    
+    for i, v in enumerate(missing_data.values):
+        ax.text(v + 1, i, f"{v:.1f}%", va='center', fontsize=9)
+    
+    plt.tight_layout()
+    return fig
+
+
+def create_types_chart(col_types):
+    type_counts = pd.Series(col_types).value_counts()
+    
+    fig, ax = plt.subplots(figsize=(8, 6))
+    colors_pie = ['#2196F3', '#4CAF50', '#FFC107', '#F44336', '#9C27B0', '#00BCD4']
+    
+    wedges, texts, autotexts = ax.pie(
+        type_counts.values, 
+        labels=type_counts.index, 
+        autopct='%1.1f%%',
+        colors=colors_pie[:len(type_counts)],
+        startangle=90,
+        textprops={'fontsize': 11}
+    )
+    
+    for autotext in autotexts:
+        autotext.set_color('white')
+        autotext.set_fontweight('bold')
+    
+    ax.set_title("Distribution des types de colonnes", fontsize=13, fontweight='bold', pad=15)
+    plt.tight_layout()
+    return fig
+
+
+def footer(canvas, doc):
+    canvas.saveState()
+    footer_text = f"Rapport Data Quality - Confidentiel | Page {doc.page}"
+    canvas.setFont('Helvetica', 9)
+    canvas.setFillColor(colors.HexColor('#666666'))
+    canvas.drawString(2*cm, 1.5*cm, footer_text)
+    canvas.setStrokeColor(colors.HexColor('#DDDDDD'))
+    canvas.setLineWidth(0.5)
+    canvas.line(2*cm, 2*cm, A4[0]-2*cm, 2*cm)
+    canvas.restoreState()
+
+
+# FIN PARTIE 1/2
+# La partie 2 contient: build_pdf() et l'interface Streamlit
+, na=False)]
+            if len(non_valid) > len(sample_values) * 0.2:  # Plus de 20% invalides
+                incoherence_count += len(non_valid)
+                incoherence_issues.append({
+                    'colonne': col,
+                    'type': 'Format code postal invalide',
+                    'count': len(non_valid),
+                    'exemples': non_valid.head(3).tolist()
+                })
+        
+        # Détection email invalide
+        elif 'mail' in col_lower or 'email' in col_lower:
+            email_pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}
+
+
+# ----------------------------------------------------
+# OpenAI Reports
+# ----------------------------------------------------
+def openai_generate_synthesis(df, profil):
+    if client is None:
+        return "OpenAI non configuré."
+
+    schema = ""
+    for col in df.columns[:15]:
+        missing = profil['missing_pct'][col]
+        schema += f"- {col} ({profil['dtypes'][col]}): {missing:.1f}% manquant, {df[col].nunique()} valeurs uniques\n"
+
+    missing_mean = pd.Series(profil['missing_pct']).mean()
+    total_missing = sum(profil['missing_count'].values())
+    
+    top_missing = pd.Series(profil['missing_pct']).sort_values(ascending=False).head(5)
+    top_missing_str = "\n".join([f"  - {col}: {pct:.1f}%" for col, pct in top_missing.items()])
+    
+    prompt = f"""
+    Tu es consultant expert en Data Quality. Analyse ce dataset et fournis un rapport DÉTAILLÉ et STRUCTURÉ.
+
+    ## Données globales
+    - Lignes: {profil['rows']:,}
+    - Colonnes: {profil['cols']}
+    - Score global: {profil['global_score']}%
+    - Valeurs manquantes totales: {total_missing:,} ({missing_mean:.2f}% en moyenne)
+    - Doublons: {profil['duplicate_rows']}
+    - Colonnes constantes: {len(profil['constant_columns'])}
+    - Colonnes vides: {len(profil['empty_columns'])}
+
+    ## Top 5 colonnes avec valeurs manquantes
+{top_missing_str}
+
+    ## Outliers détectés (IQR)
+    {dict(list(profil['outliers'].items())[:5])}
+
+    ## Format attendu:
+
+    ### Synthèse Professionnelle
+    Rédige une analyse détaillée (15-20 lignes) couvrant:
+    - État général du dataset
+    - Problématiques majeures avec impact business
+    - Risques pour les analyses
+    - Axes d'amélioration prioritaires
+
+    ### Tableau de Priorisation
+    Format MARKDOWN:
+    
+    | Priorité | Problème | Colonnes | Recommandation |
+    |----------|----------|----------|----------------|
+    | Élevée | [problème] | [colonnes] | [action] |
+    
+    IMPORTANT:
+    - Colonne "Colonnes": MAX 20 caractères
+    - Colonne "Recommandation": MAX 60 caractères
+    - 5-8 lignes
+
+    ### 5 Quick Wins
+    1. **[Titre]**: Description (MAX 100 caractères).
+    """
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Tu es un consultant senior expert en qualité des données."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=3500,
+        temperature=0.2
+    )
+
+    return clean_ai_text(resp.choices[0].message.content)
+
+
+def openai_suggest_tests(df, profil, col_types):
+    if client is None:
+        return "OpenAI non configuré."
+
+    schema = ""
+    for col in df.columns[:15]:
+        col_type = col_types.get(col, "unknown")
+        missing = profil['missing_pct'][col]
+        unique = df[col].nunique()
+        schema += f"- {col} ({col_type}): {missing:.1f}% manquant, {unique} uniques\n"
+
+    prompt = f"""
+    Expert en data quality testing.
+    
+    Dataset:
+{schema}
+
+    Propose 8-12 tests SPÉCIFIQUES.
+    
+    Format:
+    ## [N]. [Nom]
+    **Objectif:** [Pourquoi]
+    **Colonnes:** [Colonnes]
+    **Méthode:** [Comment]
+    **Critère:** [Seuil]
+    """
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Expert en data quality testing."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=2500,
+        temperature=0.2
+    )
+
+    return clean_ai_text(resp.choices[0].message.content)
+
+
+# ----------------------------------------------------
+# PDF Generation - Fonctions graphiques
+# ----------------------------------------------------
+def fig_to_bytes(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches='tight', dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def create_gauge_chart(score):
+    fig, ax = plt.subplots(figsize=(6, 3))
+    
+    if score >= 80:
+        color = '#4CAF50'
+    elif score >= 60:
+        color = '#FFC107'
+    else:
+        color = '#F44336'
+    
+    from matplotlib.patches import Wedge
+    wedge_bg = Wedge((0.5, 0), 0.4, 0, 180, width=0.15, facecolor='#E0E0E0', edgecolor='white', linewidth=2)
+    ax.add_patch(wedge_bg)
+    
+    angle = score * 1.8
+    wedge_score = Wedge((0.5, 0), 0.4, 0, angle, width=0.15, facecolor=color, edgecolor='white', linewidth=2)
+    ax.add_patch(wedge_score)
+    
+    ax.text(0.5, 0.15, f"{score}%", ha='center', va='center', fontsize=32, fontweight='bold', color=color)
+    ax.text(0.5, -0.05, "Score Global", ha='center', va='center', fontsize=12, color='#666')
+    
+    ax.set_xlim(0, 1)
+    ax.set_ylim(-0.1, 0.5)
+    ax.axis('off')
+    
+    return fig
+
+
+def create_missing_chart(profil):
+    missing_data = pd.Series(profil['missing_pct']).sort_values(ascending=False).head(10)
+    
+    if missing_data.empty or missing_data.sum() == 0:
+        return None
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    colors_list = ['#F44336' if x > 50 else '#FFC107' if x > 20 else '#4CAF50' for x in missing_data.values]
+    
+    missing_data.plot(kind='barh', ax=ax, color=colors_list, edgecolor='white', linewidth=1.5)
+    ax.set_xlabel("Pourcentage de valeurs manquantes (%)", fontsize=11)
+    ax.set_ylabel("")
+    ax.set_title("Top 10 des colonnes avec valeurs manquantes", fontsize=13, fontweight='bold', pad=15)
+    ax.grid(axis='x', alpha=0.3, linestyle='--')
+    
+    for i, v in enumerate(missing_data.values):
+        ax.text(v + 1, i, f"{v:.1f}%", va='center', fontsize=9)
+    
+    plt.tight_layout()
+    return fig
+
+
+def create_types_chart(col_types):
+    type_counts = pd.Series(col_types).value_counts()
+    
+    fig, ax = plt.subplots(figsize=(8, 6))
+    colors_pie = ['#2196F3', '#4CAF50', '#FFC107', '#F44336', '#9C27B0', '#00BCD4']
+    
+    wedges, texts, autotexts = ax.pie(
+        type_counts.values, 
+        labels=type_counts.index, 
+        autopct='%1.1f%%',
+        colors=colors_pie[:len(type_counts)],
+        startangle=90,
+        textprops={'fontsize': 11}
+    )
+    
+    for autotext in autotexts:
+        autotext.set_color('white')
+        autotext.set_fontweight('bold')
+    
+    ax.set_title("Distribution des types de colonnes", fontsize=13, fontweight='bold', pad=15)
+    plt.tight_layout()
+    return fig
+
+
+def footer(canvas, doc):
+    canvas.saveState()
+    footer_text = f"Rapport Data Quality - Confidentiel | Page {doc.page}"
+    canvas.setFont('Helvetica', 9)
+    canvas.setFillColor(colors.HexColor('#666666'))
+    canvas.drawString(2*cm, 1.5*cm, footer_text)
+    canvas.setStrokeColor(colors.HexColor('#DDDDDD'))
+    canvas.setLineWidth(0.5)
+    canvas.line(2*cm, 2*cm, A4[0]-2*cm, 2*cm)
+    canvas.restoreState()
+
+
+# FIN PARTIE 1/2
+# La partie 2 contient: build_pdf() et l'interface Streamlit
+
+            non_valid = sample_values[~sample_values.str.match(email_pattern, na=False)]
+            if len(non_valid) > len(sample_values) * 0.1:
+                incoherence_count += len(non_valid)
+                incoherence_issues.append({
+                    'colonne': col,
+                    'type': 'Format email invalide',
+                    'count': len(non_valid),
+                    'exemples': non_valid.head(3).tolist()
+                })
+        
+        # Détection téléphone invalide
+        elif 'tel' in col_lower or 'phone' in col_lower:
+            phone_pattern = r'^[\+]?[(]?[0-9]{1,4}[)]?[-\s\.]?[(]?[0-9]{1,4}[)]?[-\s\.]?[0-9]{1,5}[-\s\.]?[0-9]{1,5}
+
+
+# ----------------------------------------------------
+# OpenAI Reports
+# ----------------------------------------------------
+def openai_generate_synthesis(df, profil):
+    if client is None:
+        return "OpenAI non configuré."
+
+    schema = ""
+    for col in df.columns[:15]:
+        missing = profil['missing_pct'][col]
+        schema += f"- {col} ({profil['dtypes'][col]}): {missing:.1f}% manquant, {df[col].nunique()} valeurs uniques\n"
+
+    missing_mean = pd.Series(profil['missing_pct']).mean()
+    total_missing = sum(profil['missing_count'].values())
+    
+    top_missing = pd.Series(profil['missing_pct']).sort_values(ascending=False).head(5)
+    top_missing_str = "\n".join([f"  - {col}: {pct:.1f}%" for col, pct in top_missing.items()])
+    
+    prompt = f"""
+    Tu es consultant expert en Data Quality. Analyse ce dataset et fournis un rapport DÉTAILLÉ et STRUCTURÉ.
+
+    ## Données globales
+    - Lignes: {profil['rows']:,}
+    - Colonnes: {profil['cols']}
+    - Score global: {profil['global_score']}%
+    - Valeurs manquantes totales: {total_missing:,} ({missing_mean:.2f}% en moyenne)
+    - Doublons: {profil['duplicate_rows']}
+    - Colonnes constantes: {len(profil['constant_columns'])}
+    - Colonnes vides: {len(profil['empty_columns'])}
+
+    ## Top 5 colonnes avec valeurs manquantes
+{top_missing_str}
+
+    ## Outliers détectés (IQR)
+    {dict(list(profil['outliers'].items())[:5])}
+
+    ## Format attendu:
+
+    ### Synthèse Professionnelle
+    Rédige une analyse détaillée (15-20 lignes) couvrant:
+    - État général du dataset
+    - Problématiques majeures avec impact business
+    - Risques pour les analyses
+    - Axes d'amélioration prioritaires
+
+    ### Tableau de Priorisation
+    Format MARKDOWN:
+    
+    | Priorité | Problème | Colonnes | Recommandation |
+    |----------|----------|----------|----------------|
+    | Élevée | [problème] | [colonnes] | [action] |
+    
+    IMPORTANT:
+    - Colonne "Colonnes": MAX 20 caractères
+    - Colonne "Recommandation": MAX 60 caractères
+    - 5-8 lignes
+
+    ### 5 Quick Wins
+    1. **[Titre]**: Description (MAX 100 caractères).
+    """
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Tu es un consultant senior expert en qualité des données."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=3500,
+        temperature=0.2
+    )
+
+    return clean_ai_text(resp.choices[0].message.content)
+
+
+def openai_suggest_tests(df, profil, col_types):
+    if client is None:
+        return "OpenAI non configuré."
+
+    schema = ""
+    for col in df.columns[:15]:
+        col_type = col_types.get(col, "unknown")
+        missing = profil['missing_pct'][col]
+        unique = df[col].nunique()
+        schema += f"- {col} ({col_type}): {missing:.1f}% manquant, {unique} uniques\n"
+
+    prompt = f"""
+    Expert en data quality testing.
+    
+    Dataset:
+{schema}
+
+    Propose 8-12 tests SPÉCIFIQUES.
+    
+    Format:
+    ## [N]. [Nom]
+    **Objectif:** [Pourquoi]
+    **Colonnes:** [Colonnes]
+    **Méthode:** [Comment]
+    **Critère:** [Seuil]
+    """
+
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Expert en data quality testing."},
+            {"role": "user", "content": prompt}
+        ],
+        max_tokens=2500,
+        temperature=0.2
+    )
+
+    return clean_ai_text(resp.choices[0].message.content)
+
+
+# ----------------------------------------------------
+# PDF Generation - Fonctions graphiques
+# ----------------------------------------------------
+def fig_to_bytes(fig):
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", bbox_inches='tight', dpi=150)
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def create_gauge_chart(score):
+    fig, ax = plt.subplots(figsize=(6, 3))
+    
+    if score >= 80:
+        color = '#4CAF50'
+    elif score >= 60:
+        color = '#FFC107'
+    else:
+        color = '#F44336'
+    
+    from matplotlib.patches import Wedge
+    wedge_bg = Wedge((0.5, 0), 0.4, 0, 180, width=0.15, facecolor='#E0E0E0', edgecolor='white', linewidth=2)
+    ax.add_patch(wedge_bg)
+    
+    angle = score * 1.8
+    wedge_score = Wedge((0.5, 0), 0.4, 0, angle, width=0.15, facecolor=color, edgecolor='white', linewidth=2)
+    ax.add_patch(wedge_score)
+    
+    ax.text(0.5, 0.15, f"{score}%", ha='center', va='center', fontsize=32, fontweight='bold', color=color)
+    ax.text(0.5, -0.05, "Score Global", ha='center', va='center', fontsize=12, color='#666')
+    
+    ax.set_xlim(0, 1)
+    ax.set_ylim(-0.1, 0.5)
+    ax.axis('off')
+    
+    return fig
+
+
+def create_missing_chart(profil):
+    missing_data = pd.Series(profil['missing_pct']).sort_values(ascending=False).head(10)
+    
+    if missing_data.empty or missing_data.sum() == 0:
+        return None
+    
+    fig, ax = plt.subplots(figsize=(10, 6))
+    colors_list = ['#F44336' if x > 50 else '#FFC107' if x > 20 else '#4CAF50' for x in missing_data.values]
+    
+    missing_data.plot(kind='barh', ax=ax, color=colors_list, edgecolor='white', linewidth=1.5)
+    ax.set_xlabel("Pourcentage de valeurs manquantes (%)", fontsize=11)
+    ax.set_ylabel("")
+    ax.set_title("Top 10 des colonnes avec valeurs manquantes", fontsize=13, fontweight='bold', pad=15)
+    ax.grid(axis='x', alpha=0.3, linestyle='--')
+    
+    for i, v in enumerate(missing_data.values):
+        ax.text(v + 1, i, f"{v:.1f}%", va='center', fontsize=9)
+    
+    plt.tight_layout()
+    return fig
+
+
+def create_types_chart(col_types):
+    type_counts = pd.Series(col_types).value_counts()
+    
+    fig, ax = plt.subplots(figsize=(8, 6))
+    colors_pie = ['#2196F3', '#4CAF50', '#FFC107', '#F44336', '#9C27B0', '#00BCD4']
+    
+    wedges, texts, autotexts = ax.pie(
+        type_counts.values, 
+        labels=type_counts.index, 
+        autopct='%1.1f%%',
+        colors=colors_pie[:len(type_counts)],
+        startangle=90,
+        textprops={'fontsize': 11}
+    )
+    
+    for autotext in autotexts:
+        autotext.set_color('white')
+        autotext.set_fontweight('bold')
+    
+    ax.set_title("Distribution des types de colonnes", fontsize=13, fontweight='bold', pad=15)
+    plt.tight_layout()
+    return fig
+
+
+def footer(canvas, doc):
+    canvas.saveState()
+    footer_text = f"Rapport Data Quality - Confidentiel | Page {doc.page}"
+    canvas.setFont('Helvetica', 9)
+    canvas.setFillColor(colors.HexColor('#666666'))
+    canvas.drawString(2*cm, 1.5*cm, footer_text)
+    canvas.setStrokeColor(colors.HexColor('#DDDDDD'))
+    canvas.setLineWidth(0.5)
+    canvas.line(2*cm, 2*cm, A4[0]-2*cm, 2*cm)
+    canvas.restoreState()
+
+
+# FIN PARTIE 1/2
+# La partie 2 contient: build_pdf() et l'interface Streamlit
+
+            non_valid = sample_values[~sample_values.str.match(phone_pattern, na=False)]
+            if len(non_valid) > len(sample_values) * 0.2:
+                incoherence_count += len(non_valid)
+                incoherence_issues.append({
+                    'colonne': col,
+                    'type': 'Format téléphone invalide',
+                    'count': len(non_valid),
+                    'exemples': non_valid.head(3).tolist()
+                })
+        
+        # Détection date invalide
+        elif 'date' in col_lower:
+            if df[col].dtype == 'object':
+                try:
+                    converted = pd.to_datetime(df[col], errors='coerce')
+                    non_valid_count = converted.isna().sum() - df[col].isna().sum()
+                    if non_valid_count > len(df) * 0.1:
+                        incoherence_count += non_valid_count
+                        incoherence_issues.append({
+                            'colonne': col,
+                            'type': 'Format date invalide',
+                            'count': int(non_valid_count),
+                            'exemples': df[col][converted.isna() & df[col].notna()].head(3).tolist()
+                        })
+                except:
+                    pass
+        
+        # Détection prénom/nom contenant des chiffres
+        elif any(x in col_lower for x in ['nom', 'prenom', 'name', 'firstname', 'lastname']):
+            has_digits = sample_values.str.contains(r'\d', na=False)
+            if has_digits.sum() > len(sample_values) * 0.05:  # Plus de 5%
+                incoherence_count += has_digits.sum()
+                incoherence_issues.append({
+                    'colonne': col,
+                    'type': 'Nom/Prénom contient des chiffres',
+                    'count': int(has_digits.sum()),
+                    'exemples': sample_values[has_digits].head(3).tolist()
+                })
+        
+        # Détection code (département, commune) contenant du texte
+        elif 'code' in col_lower and 'postal' not in col_lower:
+            if df[col].dtype == 'object':
+                has_letters = sample_values.str.contains(r'[a-zA-Z]', na=False)
+                if has_letters.sum() > len(sample_values) * 0.1:
+                    incoherence_count += has_letters.sum()
+                    incoherence_issues.append({
+                        'colonne': col,
+                        'type': 'Code contient du texte',
+                        'count': int(has_letters.sum()),
+                        'exemples': sample_values[has_letters].head(3).tolist()
+                    })
+    
+    profil['incoherence_issues'] = incoherence_issues
+    profil['incoherence_count'] = incoherence_count
+
+    # ========================================
+    # Score global AMÉLIORÉ avec cohérence
+    # ========================================
     missing_mean = pd.Series(profil['missing_pct']).mean() if profil['missing_pct'] else 0
     miss_score = max(0, 100 - missing_mean)
     dup_score = max(0, 100 - (profil["duplicate_rows"]/max(1, profil["rows"])) * 100)
     out_score = max(0, 100 - (np.mean(list(outliers.values())) if outliers else 0))
-    profil["global_score"] = round((miss_score*0.5 + dup_score*0.3 + out_score*0.2), 1)
+    
+    # NOUVEAU: Score de cohérence
+    coherence_pct = (incoherence_count / max(1, profil["rows"])) * 100
+    coherence_score = max(0, 100 - coherence_pct)
+    
+    # Pondération: 40% complétude, 20% unicité, 15% outliers, 25% cohérence
+    profil["global_score"] = round(
+        (miss_score * 0.40 + dup_score * 0.20 + out_score * 0.15 + coherence_score * 0.25), 
+        1
+    )
+    profil["coherence_score"] = round(coherence_score, 1)
 
     return profil
 
@@ -757,6 +1518,22 @@ if page == "Testez la qualité de vos données":
                 label="Colonnes vides/constantes",
                 value=len(profil["empty_columns"]) + len(profil["constant_columns"]),
                 subtitle="Colonnes sans variance", icon="📦"), unsafe_allow_html=True)
+
+            st.markdown("---")
+            
+            # ========================================
+            # NOUVEAU : Affichage des incohérences
+            # ========================================
+            if profil.get('incoherence_count', 0) > 0:
+                st.warning(f"⚠️ **{profil['incoherence_count']} incohérences détectées** (Score cohérence : {profil.get('coherence_score', 100)}%)")
+                
+                with st.expander("🔍 Détails des incohérences", expanded=True):
+                    for issue in profil['incoherence_issues']:
+                        st.error(f"**{issue['colonne']}** : {issue['type']} ({issue['count']} valeurs)")
+                        st.write(f"Exemples : {', '.join(map(str, issue['exemples']))}")
+                        st.write("---")
+                
+                st.info("💡 Ces incohérences réduisent votre score de qualité. Corrigez-les pour améliorer la fiabilité de vos données.")
 
             st.markdown("---")
 
