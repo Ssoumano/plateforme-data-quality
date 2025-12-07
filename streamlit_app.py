@@ -1,77 +1,65 @@
-# app.py (VERSION PREMIUM)
+# app.py - HYBRID (regex + OpenAI option) Data Quality Platform
 import streamlit as st
 import pandas as pd
 import numpy as np
 import io
+import re
 import matplotlib.pyplot as plt
 import seaborn as sns
 import base64
-import json
-import logging
 from datetime import datetime
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Tuple, List, Optional
 
-# Try import OpenAI client (new 1.0+ style)
+# Try import OpenAI client (new 1.0+ style). If not available, we will keep IA option disabled.
 openai_available = True
 try:
     from openai import OpenAI
 except Exception:
     openai_available = False
 
-# Try pdfkit for HTML->PDF conversion (optional)
+# Optional pdf conversion
 try:
     import pdfkit
     pdfkit_available = True
 except Exception:
     pdfkit_available = False
 
-# -----------------------------------------------------------------------------
-# App config
-# -----------------------------------------------------------------------------
-st.set_page_config(page_title="Data Quality Platform — PRO", layout="wide", initial_sidebar_state="expanded")
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("dq_app")
-
-# -----------------------------------------------------------------------------
-# Styling (PowerBI-like tiles, small animations, info icons)
-# -----------------------------------------------------------------------------
+# ----------------------------
+# App config & styling
+# ----------------------------
+st.set_page_config(page_title="Data Quality — Hybrid", layout="wide")
 POWERBI_CSS = """
 <style>
-/* Layout and container */
 section.main > div.block-container { max-width: 1400px; }
-
-/* KPI tile base */
-.kpi-tile {
-  border-radius: 12px;
-  padding: 16px;
-  display:flex;
-  justify-content:space-between;
-  align-items:center;
-  box-shadow: 0 6px 22px rgba(0,0,0,0.08);
-  transition: transform 0.18s ease, box-shadow 0.18s ease;
-}
-.kpi-tile:hover { transform: translateY(-6px); box-shadow: 0 12px 30px rgba(0,0,0,0.12); }
-.kpi-left { display:block; }
-.kpi-label { color: rgba(0,0,0,0.6); font-size:13px; }
-.kpi-value { font-weight:700; font-size:26px; margin-top:6px; }
-.kpi-sub { font-size:12px; color: rgba(0,0,0,0.55); margin-top:6px; }
-
-/* small info icon */
-.kpi-info { font-size:14px; margin-left:8px; color:#666; }
-
-/* charts */
-.chart-card { padding: 12px; background: #fff; border-radius:10px; box-shadow: 0 6px 18px rgba(0,0,0,0.04); }
-
-/* tooltip via title attr works well */
+.kpi-tile { border-radius:12px; padding:12px; display:flex; justify-content:space-between; align-items:center; box-shadow:0 6px 18px rgba(0,0,0,0.06);}
+.kpi-left {display:block;}
+.kpi-label {font-size:13px; color:rgba(0,0,0,0.6);}
+.kpi-value {font-weight:700; font-size:24px; margin-top:6px;}
+.kpi-sub {font-size:12px; color:rgba(0,0,0,0.55); margin-top:6px;}
+.kpi-info {font-size:14px; margin-left:8px; color:#666;}
+.chart-card {padding:12px; background:#fff; border-radius:10px; box-shadow:0 6px 18px rgba(0,0,0,0.04);}
 </style>
 """
 st.markdown(POWERBI_CSS, unsafe_allow_html=True)
 
-# -----------------------------------------------------------------------------
-# Utilities & Robust helpers
-# -----------------------------------------------------------------------------
+# ----------------------------
+# OPENAI client init (if present in secrets)
+# ----------------------------
+OPENAI_CLIENT = None
+if openai_available:
+    try:
+        # prefer st.secrets for production
+        OPENAI_KEY = st.secrets.get("OPENAI_API_KEY", None)
+        OPENAI_CLIENT = OpenAI(api_key=OPENAI_KEY) if OPENAI_KEY else None
+    except Exception:
+        OPENAI_CLIENT = None
+else:
+    OPENAI_CLIENT = None
+
+# ----------------------------
+# Helpers (safe operations)
+# ----------------------------
 def safe_sum(obj: Any) -> int:
-    """Return integer sum across common container types."""
     try:
         if isinstance(obj, dict):
             return int(sum(obj.values()))
@@ -79,671 +67,547 @@ def safe_sum(obj: Any) -> int:
             return int(obj.sum())
         if isinstance(obj, (list, tuple, np.ndarray)):
             return int(sum(obj))
-        # fallback: try cast to int
         return int(obj)
     except Exception:
         return 0
 
-def safe_get(d: Dict, key, default=None):
-    try:
-        return d.get(key, default)
-    except Exception:
-        return default
+def sample_values(series: pd.Series, n=30) -> List[str]:
+    s = series.dropna().astype(str)
+    if s.empty:
+        return []
+    if len(s) <= n:
+        return s.tolist()
+    # sample deterministically for reproducibility
+    return s.sample(n, random_state=42).tolist()
 
-def safe_to_datetime(series: pd.Series, threshold=0.8) -> bool:
-    """Return True if series looks like datetime (>= threshold non-null after conversion)."""
-    try:
-        conv = pd.to_datetime(series, errors="coerce")
-        return (conv.notna().sum() / max(1, len(series))) >= threshold
-    except Exception:
-        return False
+# ----------------------------
+# Pattern detectors (regex + heuristics)
+# ----------------------------
+EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
+PHONE_RE = re.compile(r"^\+?\d[\d\s\-\(\)]{6,}\d$")
+URL_RE = re.compile(r"^https?://")
+POSTAL_RE = re.compile(r"^\d{4,5}$")
+IBAN_RE = re.compile(r"^[A-Z]{2}\d{2}[A-Z0-9]{1,30}$", re.I)
 
-def compute_col_types(df: pd.DataFrame) -> Dict[str, str]:
-    """Simple automatic type detection per column."""
-    types = {}
-    n = len(df)
-    for col in df.columns:
-        s = df[col]
-        if s.isna().all():
-            types[col] = "empty"
-            continue
-        if safe_to_datetime(s):
-            types[col] = "datetime"
-            continue
-        if pd.api.types.is_numeric_dtype(s):
-            # numeric but maybe categorical (low cardinality)
-            if s.nunique(dropna=True) / max(1, n) < 0.05:
-                types[col] = "categorical"
-            else:
-                types[col] = "numeric"
-            continue
-        # not numeric: check binary / categorical / text
-        nun = s.nunique(dropna=True)
-        if nun == 2:
-            types[col] = "binary"
-        elif nun / max(1, n) < 0.05:
-            types[col] = "categorical"
-        else:
-            types[col] = "text"
-    return types
+def detect_patterns_for_series(s: pd.Series) -> Dict[str, float]:
+    """Return ratio of various patterns in the series (values are fractions 0..1)."""
+    res = {}
+    arr = s.dropna().astype(str)
+    n = len(arr)
+    if n == 0:
+        # all zeros to avoid division issues
+        for k in ["email","phone","url","postal","iban","date","numeric","alpha","has_digits","likely_name"]:
+            res[k] = 0.0
+        return res
 
-# -----------------------------------------------------------------------------
-# Data profiling (robust)
-# -----------------------------------------------------------------------------
-@st.cache_data(show_spinner=False)
-def profile_data_quality(df: pd.DataFrame) -> Dict[str, Any]:
-    """Return a dict of profiling metrics. Robust to datasets with no numeric columns."""
-    profil = {}
-    profil["rows"] = int(df.shape[0])
-    profil["cols"] = int(df.shape[1])
-
-    # missing counts and % (Series)
-    missing_count = df.isna().sum()
-    missing_pct = (df.isna().mean() * 100).round(2)
-    profil["missing_count"] = missing_count.to_dict()
-    profil["missing_pct"] = missing_pct.to_dict()
-
-    # dtypes
-    profil["dtypes"] = df.dtypes.astype(str).to_dict()
-
-    # constant / empty columns
-    profil["constant_columns"] = [c for c in df.columns if df[c].nunique(dropna=True) <= 1]
-    profil["empty_columns"] = [c for c in df.columns if df[c].dropna().shape[0] == 0]
-
-    # duplicate rows
-    profil["duplicate_rows"] = int(df.duplicated().sum())
-
-    # numeric stats (if exists)
-    numeric = df.select_dtypes(include=[np.number])
-    if numeric.shape[1] == 0:
-        profil["numeric_stats"] = {}
-        profil["outliers"] = {}
-    else:
-        # ensure describe() safe
+    # bool masks
+    emails = arr.str.match(EMAIL_RE)
+    phones = arr.str.match(PHONE_RE)
+    urls = arr.str.match(URL_RE)
+    postals = arr.str.match(POSTAL_RE)
+    ibans = arr.str.match(IBAN_RE)
+    # numeric detection: can cast to float
+    def is_num(x):
         try:
-            stats = numeric.describe().T
-            profil["numeric_stats"] = stats.to_dict(orient="index")
-        except Exception:
-            profil["numeric_stats"] = {}
+            float(x)
+            return True
+        except:
+            return False
+    numeric_mask = arr.apply(is_num)
 
-        # outliers via IQR
-        outliers = {}
-        for col in numeric.columns:
-            x = numeric[col].dropna()
-            if x.empty:
-                outliers[col] = 0
-                continue
-            q1 = x.quantile(0.25)
-            q3 = x.quantile(0.75)
-            iqr = q3 - q1
-            lower = q1 - 1.5 * iqr
-            upper = q3 + 1.5 * iqr
-            outliers[col] = int(((x < lower) | (x > upper)).sum())
-        profil["outliers"] = outliers
-
-    # global score - robust when no numeric/outliers
-    missing_mean = np.mean(list(profil["missing_pct"].values())) if profil["missing_pct"] else 0
-    miss_score = max(0, 100 - missing_mean)
-    dup_score = max(0, 100 - (profil["duplicate_rows"] / max(1, profil["rows"])) * 100)
-    out_values = list(profil["outliers"].values()) if profil.get("outliers") else []
-    out_score = max(0, 100 - np.mean(out_values)) if len(out_values)>0 else 100
-
-    profil["global_score"] = round((miss_score * 0.5 + dup_score * 0.3 + out_score * 0.2), 1)
-
-    return profil
-
-# -----------------------------------------------------------------------------
-# OpenAI helpers (compatible with openai>=1.0 , tries new "responses" then legacy)
-# -----------------------------------------------------------------------------
-def get_openai_client_from_secrets():
-    if not openai_available:
-        return None
-    key = None
+    # date detection: try pd.to_datetime
     try:
-        key = st.secrets["OPENAI_API_KEY"]
+        dt = pd.to_datetime(arr, errors="coerce", dayfirst=True)
+        dates_mask = dt.notna()
     except Exception:
-        # optionally user can set via env or pass None (OpenAI client might still work if configured)
-        key = None
-    try:
-        client = OpenAI(api_key=key) if key is not None else OpenAI()
-        return client
-    except Exception as e:
-        logger.warning(f"OpenAI client init failed: {e}")
-        return None
+        dates_mask = pd.Series([False]*n, index=arr.index)
 
-def openai_generate_text(client: Any, prompt: str, max_tokens: int = 1500, temperature: float = 0.2) -> str:
-    """Try responses API (preferred), fallback to chat.completions if present."""
+    # alpha: pure letters (names)
+    alpha_mask = arr.str.match(r"^[A-Za-zÀ-ÖØ-öø-ÿ\-\s']+$")
+
+    # digits present
+    has_digits_mask = arr.str.contains(r"\d")
+
+    # likely name heuristic: many tokens capitalized / short words
+    def likely_name_val(val: str) -> bool:
+        tokens = val.strip().split()
+        if not tokens:
+            return False
+        # require that most tokens start with uppercase letter and have len <= 20
+        up = sum(1 for t in tokens if len(t)>0 and t[0].isupper())
+        return (up / len(tokens)) >= 0.6 and len(tokens) <= 60
+
+    likely_name_mask = arr.apply(likely_name_val)
+
+    masks = {
+        "email": emails,
+        "phone": phones,
+        "url": urls,
+        "postal": postals,
+        "iban": ibans,
+        "date": dates_mask,
+        "numeric": numeric_mask,
+        "alpha": alpha_mask,
+        "has_digits": has_digits_mask,
+        "likely_name": likely_name_mask
+    }
+
+    for k, m in masks.items():
+        res[k] = float(m.sum()) / float(n)
+
+    return res
+
+# ----------------------------
+# Logical type inference
+# ----------------------------
+LOGICAL_TYPES = [
+    "email","phone","date","numeric","id","postal_code","url","iban","name","categorical","text","unknown"
+]
+
+def infer_logical_type(patterns: Dict[str,float], series: pd.Series) -> Tuple[str, Dict[str,float]]:
+    """
+    Decide logical type from detected pattern ratios and heuristics.
+    Returns (logical_type, scores/details).
+    """
+    # simple rules: highest ratio wins among precise patterns
+    # Priorities: email, phone, url, iban, postal, date, numeric, name, alpha/categorical, text
+    # Use thresholds
+    if patterns["email"] >= 0.5:
+        return "email", patterns
+    if patterns["phone"] >= 0.5:
+        return "phone", patterns
+    if patterns["url"] >= 0.4:
+        return "url", patterns
+    if patterns["iban"] >= 0.2:
+        return "iban", patterns
+    if patterns["postal"] >= 0.6:
+        return "postal_code", patterns
+    if patterns["date"] >= 0.4:
+        return "date", patterns
+    if patterns["numeric"] >= 0.6:
+        # check id-like (unique high cardinality equal rows)
+        n = len(series)
+        nunique = series.nunique(dropna=True)
+        if nunique / max(1, n) > 0.9:
+            return "id", patterns
+        return "numeric", patterns
+    if patterns["likely_name"] >= 0.5 or patterns["alpha"] >= 0.6:
+        return "name", patterns
+    # categorical heuristic
+    nunique = series.nunique(dropna=True)
+    if nunique <= max(1, min(50, int(len(series)*0.05))):
+        return "categorical", patterns
+    # fallback text
+    return "text", patterns
+
+# ----------------------------
+# Semantic anomaly scoring
+# ----------------------------
+def semantic_anomaly_for_column(col_name: str, logical_type: str, patterns: Dict[str,float]) -> Dict[str,Any]:
+    """
+    Compute an anomaly score and message: 0..1 where 1 means highly anomalous.
+    We'll consider:
+      - if column name suggests a type that differs from inferred type (heuristic)
+      - if inferred type ratio is low (e.g. only 20% emails) -> partial anomaly
+    """
+    # check name hints
+    name_lower = col_name.lower()
+    name_hint = "unknown"
+    if any(k in name_lower for k in ["mail","email","e-mail","courriel"]):
+        name_hint = "email"
+    elif any(k in name_lower for k in ["phone","tel","mobile","gsm","telephone","tél"]):
+        name_hint = "phone"
+    elif "date" in name_lower or "jour" in name_lower or "annee" in name_lower or "year" in name_lower:
+        name_hint = "date"
+    elif any(k in name_lower for k in ["nom","prenom","name","first","last","surname"]):
+        name_hint = "name"
+    elif "id" in name_lower or "code" in name_lower or "ref" in name_lower or "num" in name_lower:
+        name_hint = "id"
+    elif any(k in name_lower for k in ["postal","zip","cp","postcode"]):
+        name_hint = "postal_code"
+
+    # strength of inferred type (confidence)
+    confidence = 0.0
+    # map logical_type to a relevant patterns key
+    mapping = {
+        "email":"email","phone":"phone","url":"url","iban":"iban",
+        "postal_code":"postal","date":"date","numeric":"numeric","id":"numeric",
+        "name":"likely_name","categorical":"numeric","text":"alpha"
+    }
+    key = mapping.get(logical_type, None)
+    if key:
+        confidence = patterns.get(key, 0.0)
+    else:
+        # fallback average of numeric/date/email presence
+        confidence = max(patterns.get("numeric", 0), patterns.get("date",0), patterns.get("email",0))
+
+    # anomaly due to mismatch with name hint
+    mismatch = 0.0
+    if name_hint != "unknown" and name_hint != logical_type:
+        # severity depends on confidence of inferred type and presence of hint
+        mismatch = 0.5 * (1.0 - confidence) + 0.5
+    else:
+        mismatch = 0.0
+
+    # partial_conformity: if confidence < 0.6 -> partial anomaly
+    partial = max(0.0, 0.6 - confidence)  # 0 when confidence >=0.6
+
+    # final anomaly score in [0,1]
+    anomaly = min(1.0, mismatch + partial)
+
+    info = {
+        "col_name": col_name,
+        "name_hint": name_hint,
+        "logical_type": logical_type,
+        "confidence": round(float(confidence), 3),
+        "mismatch_with_name": round(float(mismatch),3),
+        "partial_anomaly": round(float(partial),3),
+        "anomaly_score": round(float(anomaly),3)
+    }
+    return info
+
+# ----------------------------
+# OpenAI per-column refinement (optional)
+# ----------------------------
+def openai_refine_column(client: Any, col_name: str, sample_vals: List[str]) -> str:
+    """
+    Send a compact prompt to OpenAI to get textual judgement on a column sample.
+    Returns the raw text answer.
+    """
     if client is None:
         return "OpenAI non configuré."
-    # Try responses.create (new API)
+    # build prompt
+    sample_text = "\n".join(f"- {v}" for v in sample_vals[:40])
+    prompt = f"""
+Tu es un expert en data quality. Voici un échantillon de valeurs pour une colonne nommée "{col_name}":
+{sample_text}
+
+1) Indique quel est le type logique le plus probable parmi: email, phone, date, name, numeric, id, postal_code, url, iban, city, country, text.
+2) Donne un pourcentage estimé d'anomalies (valeurs qui ne correspondent pas au type attendu).
+3) Donne 2-3 exemples de règles simples (regex/heuristique) permettant de tester la colonne.
+
+Réponds en texte clair, sans autre contenu.
+"""
+    # try responses API then fallback
     try:
-        # using messages format inside 'input' for Responses API
-        resp = client.responses.create(
-            model="gpt-4o-mini",
-            input=prompt,
-            max_tokens=max_tokens,
-            temperature=temperature
-        )
-        # New responses API returns output array; extract text
-        output_texts = []
-        for item in resp.output:
-            # item may have 'content' list of dicts with 'text'
-            if isinstance(item, dict) and "content" in item:
-                for c in item["content"]:
-                    if "text" in c:
-                        output_texts.append(c["text"])
-            elif isinstance(item, str):
-                output_texts.append(item)
-        if output_texts:
-            return "\n".join(output_texts)
-        # Fallback to resp.output_text if available
-        if hasattr(resp, "output_text"):
-            return resp.output_text
-        return str(resp)
+        resp = client.responses.create(model="gpt-4o-mini", input=prompt, max_tokens=400, temperature=0.1)
+        # extract text
+        txt = ""
+        # resp.output may contain content pieces
+        if hasattr(resp, "output") and isinstance(resp.output, list):
+            for item in resp.output:
+                if isinstance(item, dict) and "content" in item:
+                    for c in item["content"]:
+                        if isinstance(c, dict) and "text" in c:
+                            txt += c["text"]
+                elif isinstance(item, str):
+                    txt += item
+        elif hasattr(resp, "output_text"):
+            txt = resp.output_text
+        return txt.strip()
     except Exception as e:
-        logger.info(f"responses.create failed or not available: {e}")
-        # fallback: try chat.completions (older)
+        # fallback to older chat completions if available
         try:
             if hasattr(client, "chat"):
-                resp2 = client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role":"system","content":"Tu es un expert en data quality."},
-                              {"role":"user","content":prompt}],
-                    max_tokens=max_tokens,
-                    temperature=temperature
-                )
-                # extract text
-                text = resp2.choices[0].message.content
-                return text
-        except Exception as e2:
-            logger.warning(f"Fallback chat.completions failed: {e2}")
-            return f"Erreur OpenAI (voir logs): {e2}"
+                resp2 = client.chat.completions.create(model="gpt-4o-mini",
+                                                      messages=[{"role":"system","content":"Tu es un expert en data quality."},
+                                                                {"role":"user","content":prompt}],
+                                                      max_tokens=400, temperature=0.1)
+                return resp2.choices[0].message.content
+        except Exception:
+            return f"Erreur OpenAI: {e}"
     return "Erreur OpenAI inconnue."
 
-def openai_synthesis_for_profile(client: Any, df: pd.DataFrame, profil: Dict[str, Any]) -> str:
-    # Compose compact prompt (limit columns)
-    sample_cols = list(df.columns[:15])
-    schema_desc = ""
-    for c in sample_cols:
-        pct = profil["missing_pct"].get(c, 0)
-        dtype = profil["dtypes"].get(c, str(df[c].dtype))
-        uniq = int(df[c].nunique(dropna=True))
-        schema_desc += f"- {c} ({dtype}): {pct:.1f}% missing, {uniq} unique\n"
-
-    missing_mean = np.mean(list(profil["missing_pct"].values())) if profil["missing_pct"] else 0
-    prompt = f"""
-Tu es consultant senior en Data Quality. Analyse ce dataset.
-
-Lignes: {profil['rows']}, Colonnes: {profil['cols']}
-Score global: {profil['global_score']}%
-Miss% moy.: {missing_mean:.2f}%
-Doublons: {profil['duplicate_rows']}
-Colonnes constantes: {profil['constant_columns']}
-
-Extrait du schéma:
-{schema_desc}
-
-Réponds strictement au format Markdown:
-### Synthèse Professionnelle
-(10-15 lignes, impact business + risques)
-
-### Tableau de Priorisation
-| Priorité | Problème | Colonnes concernées | Impact | Recommandation |
-|---|---|---|---|---|
-(donne 5-7 lignes)
-
-### Quick Wins
-1) ...
-2) ...
-"""
-    return openai_generate_text(client, prompt, max_tokens=2000, temperature=0.15)
-
-def openai_suggest_tests_for_schema(client: Any, df: pd.DataFrame, profil: Dict[str, Any], col_types: Dict[str,str]) -> str:
-    sample_cols = list(df.columns[:15])
-    schema_desc = ""
-    for c in sample_cols:
-        pct = profil["missing_pct"].get(c, 0)
-        ctype = col_types.get(c, "unknown")
-        uniq = int(df[c].nunique(dropna=True))
-        schema_desc += f"- {c} ({ctype}): {pct:.1f}% missing, {uniq} unique\n"
-
-    prompt = f"""
-Tu es expert en tests de data quality. Propose 8 à 12 tests précis et actionnables pour le schéma suivant:
-
-{schema_desc}
-
-Pour chaque test, fournis:
-Titre
-Objectif
-Colonnes à tester
-Méthode (ex: SQL/Pandas)
-Critère de succès (seuil)
-
-Couvre: complétude, validité, cohérence, unicité, exactitude.
-"""
-    return openai_generate_text(client, prompt, max_tokens=1800, temperature=0.2)
-
-# -----------------------------------------------------------------------------
-# Chart helpers (premium visuals)
-# -----------------------------------------------------------------------------
-def fig_to_bytes(fig) -> io.BytesIO:
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", bbox_inches='tight', dpi=150)
-    plt.close(fig)
-    buf.seek(0)
-    return buf
-
-def create_outliers_heatmap(profil: Dict[str, Any]):
-    out = profil.get("outliers", {})
-    if not out:
-        return None
-    df_out = pd.DataFrame.from_dict(out, orient="index", columns=["outliers"]).sort_values("outliers", ascending=False)
-    fig, ax = plt.subplots(figsize=(8, max(2, 0.35 * len(df_out))))
-    sns.heatmap(df_out, annot=True, fmt="d", cmap="Reds", linewidths=.6, linecolor="white", ax=ax, cbar_kws={'label':'# outliers'})
-    ax.set_title("Outliers détectés par colonne (IQR)")
-    ax.set_ylabel("")
-    ax.set_yticklabels(ax.get_yticklabels(), rotation=0, fontsize=10)
-    plt.tight_layout()
-    return fig
-
-def create_missing_bar(profil: Dict[str, Any], top_n=10):
-    mp = pd.Series(profil.get("missing_pct", {}))
-    if mp.empty or mp.sum() == 0:
-        return None
-    mp = mp.sort_values(ascending=False).head(top_n)
-    fig, ax = plt.subplots(figsize=(8,4))
-    colors = ['#F44336' if v>50 else '#FFC107' if v>20 else '#4CAF50' for v in mp.values]
-    mp.plot(kind='barh', ax=ax, color=colors)
-    ax.set_xlabel("Pourcentage manquant (%)")
-    ax.invert_yaxis()
-    for i,v in enumerate(mp.values):
-        ax.text(v + max(0.5, v*0.02), i, f"{v:.1f}%", va='center', fontsize=9)
-    plt.tight_layout()
-    return fig
-
-def create_missing_corr_heatmap(df: pd.DataFrame):
-    # correlation matrix of missingness (0/1)
-    mm = df.isna().astype(int)
-    if mm.sum().sum() == 0:
-        return None
-    corr = mm.corr()
-    fig, ax = plt.subplots(figsize=(10,8))
-    sns.heatmap(corr, annot=True, fmt=".2f", cmap="coolwarm", center=0, square=True, linewidths=0.4, cbar_kws={"shrink":0.7}, ax=ax)
-    ax.set_title("Corrélation des patterns de valeurs manquantes")
-    plt.tight_layout()
-    return fig
-
-def create_types_pie(col_types: Dict[str,str]):
-    s = pd.Series(list(col_types.values())).value_counts()
-    fig, ax = plt.subplots(figsize=(6,4))
-    s.plot(kind='pie', ax=ax, autopct='%1.1f%%', startangle=90, colors=['#2196F3','#4CAF50','#FFC107','#F44336','#9C27B0'])
-    ax.set_ylabel("")
-    ax.set_title("Distribution des types de colonnes")
-    plt.tight_layout()
-    return fig
-
-# -----------------------------------------------------------------------------
-# PDF / HTML export
-# -----------------------------------------------------------------------------
-def generate_html_report(synthesis_markdown: str, profil: Dict[str,Any], charts_bytes: Dict[str, bytes]) -> str:
-    """Return HTML string for the report. charts_bytes: name->bytes (PNG) - base64 them."""
-    def img_b64(b):
-        return base64.b64encode(b.getvalue()).decode() if hasattr(b, "getvalue") else base64.b64encode(b).decode()
-
-    rows_meta = f"""
-    <ul>
-      <li>Lignes: {profil['rows']:,}</li>
-      <li>Colonnes: {profil['cols']}</li>
-      <li>Score global: {profil['global_score']}%</li>
-      <li>Valeurs manquantes totales: {safe_sum(profil['missing_count'])}</li>
-      <li>Doublons: {profil['duplicate_rows']}</li>
-    </ul>
-    """
-    imgs_html = ""
-    for k, b in charts_bytes.items():
-        imgs_html += f"<h4>{k}</h4><img src='data:image/png;base64,{img_b64(b)}' style='max-width:100%;height:auto;'/>"
-
-    html = f"""
-    <html><head><meta charset="utf-8"><title>Rapport Data Quality</title></head><body style="font-family:Arial,Helvetica,sans-serif">
-    <h1>Rapport Data Quality</h1>
-    <h3>Métadonnées</h3>
-    {rows_meta}
-    <h3>Synthèse</h3>
-    <div>{synthesis_markdown.replace('\\n','<br/>')}</div>
-    <hr/>
-    {imgs_html}
-    <footer><small>Généré le {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}</small></footer>
-    </body></html>
-    """
-    return html
-
-def prepare_download_link_bytes(bytes_buf: io.BytesIO, filename: str, label: str):
-    b64 = base64.b64encode(bytes_buf.getvalue()).decode()
-    href = f'<a href="data:application/octet-stream;base64,{b64}" download="{filename}">{label}</a>'
-    return href
-
-def export_pdf_from_html(html: str) -> Optional[bytes]:
-    """Try to produce PDF bytes using pdfkit if available."""
-    if not pdfkit_available:
-        return None
-    try:
-        pdf_bytes = pdfkit.from_string(html, False)
-        return pdf_bytes
-    except Exception as e:
-        logger.warning(f"pdfkit conversion failed: {e}")
-        return None
-
-# -----------------------------------------------------------------------------
-# UI page layout
-# -----------------------------------------------------------------------------
+# ----------------------------
+# UI / Main flow
+# ----------------------------
 st.sidebar.title("Navigation")
-page = st.sidebar.radio("Aller à", ["Tableau de bord", "Contact"])
+page = st.sidebar.radio("Aller à", ["Dashboard", "Contact"])
 
 if page == "Contact":
     st.title("Contact")
     st.markdown("""
-**Nom :** SOUMANO Seydou  
-**E-mail :** soumanoseydou@icloud.com  
-**Téléphone :** +33 6 64 67 88 87  
-**LinkedIn :** https://linkedin.com/in/seydou-soumano  
-**GitHub :** https://github.com/Ssoumano
+**Nom** : SOUMANO Seydou  
+**E-mail** : soumanoseydou@icloud.com  
+**Téléphone** : +33 6 64 67 88 87  
+**LinkedIn** : https://linkedin.com/in/seydou-soumano  
+**GitHub** : https://github.com/Ssoumano
 """)
-else:
-    # Main dashboard
-    st.title("📊 Data Quality Platform — PRO")
-    st.write("Importe un fichier (CSV/XLSX). L'app analyse automatiquement la qualité, propose synthèse et tests IA, et génère un rapport.")
+    st.stop()
 
-    # OpenAI client
-    openai_client = get_openai_client_from_secrets() if openai_available else None
-    if openai_client is None:
-        st.info("OpenAI non configuré — ajoute OPENAI_API_KEY dans les secrets pour activer les fonctionnalités IA.")
+# Main dashboard
+st.title("📊 Data Quality — HYBRID (Regex + IA optionnelle)")
+st.write("Importe un fichier CSV/XLSX. L'analyse est générique — s'adapte à tout dataset.")
 
-    uploaded_file = st.file_uploader("Importer un fichier (CSV / XLSX)", type=["csv","xlsx","xls"])
-    if uploaded_file is None:
-        st.info("Téléverse un fichier pour démarrer l'analyse.")
+uploaded_file = st.file_uploader("Importer un fichier", type=["csv","xlsx","xls"])
+if uploaded_file is None:
+    st.info("Téléverse un fichier pour commencer l'analyse.")
+    st.stop()
+
+# Load dataset robustly
+try:
+    raw = uploaded_file.getvalue()
+    name = uploaded_file.name.lower()
+    if name.endswith(".csv"):
+        sample = raw[:4096].decode(errors="ignore")
+        sep = "," if "," in sample else ";" if ";" in sample else ","
+        df = pd.read_csv(io.BytesIO(raw), sep=sep, engine="python")
     else:
-        # Try load dataframe robustly
-        try:
-            # Try pandas to detect separator and read
-            name_l = uploaded_file.name.lower()
-            raw = uploaded_file.getvalue()
-            if name_l.endswith(".csv"):
-                sample = raw[:4096].decode(errors="ignore")
-                sep = "," if "," in sample else ";" if ";" in sample else ","
-                df = pd.read_csv(io.BytesIO(raw), sep=sep, engine="python")
-            elif name_l.endswith((".xls", ".xlsx")):
-                df = pd.read_excel(io.BytesIO(raw))
-            else:
-                df = pd.read_csv(io.BytesIO(raw), engine="python")
-        except Exception as e:
-            logger.exception("Failed to load file")
-            st.error(f"Impossible de lire le fichier: {e}")
-            df = None
+        df = pd.read_excel(io.BytesIO(raw))
+except Exception as e:
+    st.error(f"Impossible de lire le fichier: {e}")
+    st.stop()
 
-        if df is None:
-            st.stop()
+st.subheader("Aperçu (limité)")
+try:
+    st.dataframe(df.head(300))
+except Exception:
+    st.write("Aperçu non disponible (dataset volumineux).")
 
-        # Limit df for display but keep full df for analysis
-        display_limit = 300
-        st.subheader("Aperçu du dataset")
+# Basic profiling (reusing earlier profile_data_quality idea)
+@st.cache_data
+def profile_basic(df: pd.DataFrame) -> Dict[str,Any]:
+    profil = {}
+    profil["rows"] = int(df.shape[0])
+    profil["cols"] = int(df.shape[1])
+    profil["missing_count"] = df.isna().sum().to_dict()
+    profil["missing_pct"] = (df.isna().mean()*100).round(2).to_dict()
+    profil["dtypes"] = df.dtypes.astype(str).to_dict()
+    profil["constant_columns"] = [c for c in df.columns if df[c].nunique(dropna=True) <= 1]
+    profil["empty_columns"] = [c for c in df.columns if df[c].dropna().shape[0] == 0]
+    profil["duplicate_rows"] = int(df.duplicated().sum())
+    # numeric stats if any
+    numeric = df.select_dtypes(include=[np.number])
+    if numeric.shape[1] > 0:
         try:
-            st.dataframe(df.head(display_limit))
+            profil["numeric_stats"] = numeric.describe().T.to_dict(orient="index")
         except Exception:
-            st.write("Aperçu non disponible (dataset volumineux).")
+            profil["numeric_stats"] = {}
+    else:
+        profil["numeric_stats"] = {}
+    # outliers
+    outliers = {}
+    for col in numeric.columns:
+        x = numeric[col].dropna()
+        if x.empty:
+            outliers[col] = 0
+            continue
+        q1 = x.quantile(0.25); q3 = x.quantile(0.75); iqr = q3-q1
+        outliers[col] = int(((x < q1 - 1.5*iqr) | (x > q3 + 1.5*iqr)).sum())
+    profil["outliers"] = outliers
+    # global score simple (keep your earlier weights but will add semantic later)
+    miss_mean = np.mean(list((pd.Series(profil["missing_pct"]).fillna(0).values))) if profil["missing_pct"] else 0
+    miss_score = max(0, 100 - miss_mean)
+    dup_score = max(0, 100 - (profil["duplicate_rows"]/max(1, profil["rows"])) * 100)
+    out_values = list(profil["outliers"].values()) if profil.get("outliers") else []
+    out_score = max(0, 100 - np.mean(out_values)) if out_values else 100
+    profil["global_score_base"] = round((miss_score*0.5 + dup_score*0.3 + out_score*0.2), 1)
+    return profil
 
-        # Profiling (cached)
-        with st.spinner("Profiling des données..."):
+profil = profile_basic(df)
+
+# Detect logical types and compute semantic anomalies across all columns
+col_types = {}
+col_patterns = {}
+col_semantics = {}
+for col in df.columns:
+    s = df[col]
+    patterns = detect_patterns_for_series(s)
+    logical_type, _ = infer_logical_type(patterns, s)
+    sem = semantic_anomaly_for_column(col, logical_type, patterns)
+    col_types[col] = logical_type
+    col_patterns[col] = patterns
+    col_semantics[col] = sem
+
+# compute semantic score: average (1 - anomaly) * 100
+anomaly_scores = [v["anomaly_score"] for v in col_semantics.values()] if col_semantics else [0]
+semantic_score = 100 * (1 - np.mean(anomaly_scores)) if anomaly_scores else 100
+semantic_score = round(float(max(0, min(100, semantic_score))), 1)
+
+# combined global score: we can weight semantic as 30% (configurable)
+WEIGHT_BASE = 0.7  # base score weight (missing/dup/out)
+WEIGHT_SEMANTIC = 0.3
+global_score = round(profil["global_score_base"] * WEIGHT_BASE + semantic_score * WEIGHT_SEMANTIC, 1)
+
+# KPI tiles
+st.markdown("---")
+c1, c2, c3, c4 = st.columns(4, gap="large")
+with c1:
+    st.markdown(f"""
+    <div class="kpi-tile" title="Score combiné (base + qualité sémantique)">
+      <div class="kpi-left">
+        <div class="kpi-label">Score global <span class="kpi-info">ℹ️</span></div>
+        <div class="kpi-value">{global_score}%</div>
+        <div class="kpi-sub">Base + Sémantique</div>
+      </div><div style="font-size:36px;">📊</div></div>
+    """, unsafe_allow_html=True)
+with c2:
+    missing_total = safe_sum(profil["missing_count"])
+    st.markdown(f"""
+    <div class="kpi-tile" title="Nombre total de cellules vides">
+      <div class="kpi-left"><div class="kpi-label">Valeurs manquantes <span class="kpi-info">ℹ️</span></div>
+      <div class="kpi-value">{missing_total}</div><div class="kpi-sub">Total NA</div></div><div style="font-size:36px;">❗</div></div>
+    """, unsafe_allow_html=True)
+with c3:
+    st.markdown(f"""
+    <div class="kpi-tile" title="Doublons">
+      <div class="kpi-left"><div class="kpi-label">Doublons <span class="kpi-info">ℹ️</span></div>
+      <div class="kpi-value">{profil['duplicate_rows']}</div><div class="kpi-sub">Lignes identiques</div></div><div style="font-size:36px;">📑</div></div>
+    """, unsafe_allow_html=True)
+with c4:
+    cols_problem = len(profil["empty_columns"]) + len(profil["constant_columns"])
+    st.markdown(f"""
+    <div class="kpi-tile" title="Colonnes vides ou constantes">
+      <div class="kpi-left"><div class="kpi-label">Colonnes vides/constantes <span class="kpi-info">ℹ️</span></div>
+      <div class="kpi-value">{cols_problem}</div><div class="kpi-sub">Sans variance</div></div><div style="font-size:36px;">📦</div></div>
+    """, unsafe_allow_html=True)
+
+# show semantic score separately
+st.markdown("---")
+st.write(f"**Score sémantique :** {semantic_score}% — (moyenne d'anomalies colonnes). Poids dans le global : {int(WEIGHT_SEMANTIC*100)}%")
+st.info("Le score sémantique mesure si le contenu des colonnes correspond à un type logique attendu (email, date, name...).")
+
+# Display per-column semantic table
+st.subheader("Diagnostic sémantique par colonne")
+sem_df = pd.DataFrame.from_dict(col_semantics, orient="index")
+# add inferred type
+sem_df["inferred_type"] = sem_df["logical_type"]
+sem_df = sem_df[["inferred_type","confidence","anomaly_score","name_hint","mismatch_with_name","partial_anomaly"]]
+sem_df = sem_df.sort_values("anomaly_score", ascending=False)
+st.dataframe(sem_df.style.format({"confidence":"{:.2f}","anomaly_score":"{:.3f}"}), use_container_width=True)
+
+# show top examples when high anomaly
+st.markdown("### Colonnes avec anomalies élevées (anomaly_score > 0.4)")
+high_anom_cols = [c for c,v in col_semantics.items() if v["anomaly_score"]>0.4]
+for col in high_anom_cols:
+    st.markdown(f"**{col}** — inferred: *{col_semantics[col]['logical_type']}* — anomaly: {col_semantics[col]['anomaly_score']}")
+    sample = sample_values(df[col], n=12)
+    st.write(sample)
+
+# Column interactive analysis + IA refine
+st.markdown("---")
+st.subheader("Analyse détaillée d'une colonne (heuristiques + IA optionnelle)")
+col_choice = st.selectbox("Choisir une colonne", df.columns.tolist())
+if col_choice:
+    s = df[col_choice]
+    patterns = col_patterns[col_choice]
+    inferred_type = col_types[col_choice]
+    seminfo = col_semantics[col_choice]
+
+    cA, cB = st.columns([1,2])
+    with cA:
+        st.write("Inferred type:", inferred_type)
+        st.write("Confidence (pattern):", round(patterns.get({
+            "email":"email","phone":"phone","url":"url",
+            "postal":"postal","iban":"iban","date":"date","numeric":"numeric",
+            "alpha":"alpha","likely_name":"likely_name"
+        }.get(inferred_type,"numeric"),0),3))
+        st.write("Anomaly score:", seminfo["anomaly_score"])
+        st.write("Name hint:", seminfo["name_hint"])
+    with cB:
+        st.write("Top patterns (ratios):")
+        st.json({k:round(v,3) for k,v in patterns.items()})
+
+    st.markdown("Exemples de valeurs (sample)")
+    st.write(sample_values(s, n=30))
+
+    # Option: refine with OpenAI
+    if OPENAI_CLIENT:
+        if st.button(f"Générer rapport IA pour la colonne '{col_choice}'"):
+            with st.spinner("Appel OpenAI en cours..."):
+                try:
+                    txt = openai_refine_column(OPENAI_CLIENT, col_choice, sample_values(s, n=40))
+                    st.markdown("**Résultat IA :**")
+                    st.write(txt)
+                except Exception as e:
+                    st.error(f"Erreur OpenAI : {e}")
+    else:
+        st.info("OpenAI non configuré — pas de raffinement IA possible (ajoute OPENAI_API_KEY dans secrets).")
+
+# Visualizations: missing top, outlier heatmap if numeric, types distribution
+st.markdown("---")
+st.subheader("Visualisations")
+# missing bar
+mp = pd.Series(profil["missing_pct"])
+if mp.sum() > 0:
+    top_missing = mp.sort_values(ascending=False).head(12)
+    fig, ax = plt.subplots(figsize=(8,4))
+    colors = ['#F44336' if v>50 else '#FFC107' if v>20 else '#4CAF50' for v in top_missing.values]
+    top_missing.plot(kind='barh', ax=ax, color=colors)
+    ax.invert_yaxis(); ax.set_xlabel("% manquant"); ax.set_title("Top colonnes manquantes")
+    for i,v in enumerate(top_missing.values):
+        ax.text(v+0.5,i,f"{v:.1f}%")
+    st.pyplot(fig)
+else:
+    st.info("Aucune valeur manquante significative détectée.")
+
+# Outliers heatmap
+out_map = profil.get("outliers", {})
+if out_map:
+    df_out = pd.DataFrame.from_dict(out_map, orient="index", columns=["outliers"]).sort_values("outliers", ascending=False)
+    fig, ax = plt.subplots(figsize=(8, max(2,0.35*len(df_out))))
+    sns.heatmap(df_out, annot=True, fmt="d", cmap="Reds", linewidths=.5, ax=ax, cbar_kws={'label':'# outliers'})
+    ax.set_ylabel(""); ax.set_title("Outliers par colonne (IQR)")
+    st.pyplot(fig)
+else:
+    st.info("Aucune colonne numérique pour détecter des outliers.")
+
+# types distribution pie
+type_counts = pd.Series(list(col_types.values())).value_counts()
+fig, ax = plt.subplots(figsize=(6,4))
+type_counts.plot(kind='pie', autopct='%1.1f%%', ax=ax, startangle=90, colors=['#2196F3','#4CAF50','#FFC107','#F44336','#9C27B0','#00BCD4'])
+ax.set_ylabel(""); ax.set_title("Distribution des types logiques détectés")
+st.pyplot(fig)
+
+# Quick wins suggestions (basic)
+st.markdown("---")
+st.subheader("Quick Wins (automatiques)")
+suggestions = []
+if profil["empty_columns"]:
+    suggestions.append(("Supprimer colonnes vides", profil["empty_columns"]))
+if profil["constant_columns"]:
+    suggestions.append(("Supprimer colonnes constantes", profil["constant_columns"]))
+if profil["duplicate_rows"] > 0:
+    suggestions.append(("Supprimer doublons", ["all rows"]))
+
+# Add semantic-specific suggestions: columns with high anomaly
+for col, sem in col_semantics.items():
+    if sem["anomaly_score"] > 0.5:
+        suggestions.append((f"Inspecter colonne sémantiquement: {col}", [f"inferred:{sem['logical_type']} - anomaly {sem['anomaly_score']}"]))
+
+if suggestions:
+    for title, cols in suggestions:
+        st.write(f"- **{title}** — {cols}")
+else:
+    st.success("Aucune Quick Win automatique détectée.")
+
+# Export HTML report (simple)
+st.markdown("---")
+st.subheader("Export / Rapport")
+def html_report(synthesis_markdown: str) -> str:
+    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    rows_meta = f"<ul><li>Lignes: {profil['rows']:,}</li><li>Colonnes: {profil['cols']}</li><li>Score global: {global_score}%</li><li>Score sémantique: {semantic_score}%</li></ul>"
+    # attach small charts as base64 images? keep minimal for now
+    html = f"<html><body><h1>Rapport Data Quality</h1><h3>Meta</h3>{rows_meta}<h3>Synthèse</h3><div>{synthesis_markdown.replace('\\n','<br/>')}</div><footer>Généré: {now}</footer></body></html>"
+    return html
+
+# produce a small local synthesis fallback (or show button to call IA full synthesis)
+local_synth = f"Dataset {profil['rows']:,}×{profil['cols']}. Score global: {global_score}%. Score sémantique: {semantic_score}%. Colonnes top anomalous: {', '.join(high_anom_cols[:5]) if high_anom_cols else 'None'}."
+
+html = html_report(local_synth)
+b64 = base64.b64encode(html.encode()).decode()
+st.markdown(f'<a href="data:text/html;base64,{b64}" download="report_dq.html">📄 Télécharger rapport HTML</a>', unsafe_allow_html=True)
+
+# Optionally produce PDF if pdfkit installed
+if pdfkit_available:
+    if st.button("📄 Générer PDF (via wkhtmltopdf)"):
+        with st.spinner("Conversion HTML→PDF ..."):
             try:
-                profil = profile_data_quality(df)
+                pdf_bytes = pdfkit.from_string(html, False)
+                st.download_button("📥 Télécharger PDF", data=pdf_bytes, file_name=f"rapport_dq_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf", mime="application/pdf")
             except Exception as e:
-                logger.exception("Profiling failed")
-                st.error(f"Erreur lors du profiling: {e}")
-                profil = {
-                    "rows": len(df),
-                    "cols": df.shape[1],
-                    "missing_count": df.isna().sum().to_dict(),
-                    "missing_pct": (df.isna().mean()*100).round(2).to_dict(),
-                    "dtypes": df.dtypes.astype(str).to_dict(),
-                    "constant_columns": [],
-                    "empty_columns": [],
-                    "duplicate_rows": int(df.duplicated().sum()),
-                    "outliers": {},
-                    "numeric_stats": {},
-                    "global_score": 0
-                }
+                st.error(f"Erreur conversion PDF: {e}")
+else:
+    st.info("pdfkit/wkhtmltopdf non présent sur l'environnement — téléchargement HTML disponible.")
 
-        # Column type detection
-        col_types = compute_col_types(df)
-
-        # KPI Tiles
-        c1, c2, c3, c4 = st.columns(4, gap="large")
-        # tile 1
-        info_score = "Indice synthétique : missing (50%), duplicates (30%), outliers (20%)."
-        with c1:
-            st.markdown(f"""
-            <div class="kpi-tile" title="{info_score}" style="background:#F2C811;">
-                <div class="kpi-left">
-                    <div class="kpi-label">Score global <span class="kpi-info">ℹ️</span></div>
-                    <div class="kpi-value">{profil['global_score']}%</div>
-                    <div class="kpi-sub">Indice synthétique</div>
-                </div>
-                <div style="font-size:36px;">📊</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # tile 2
-        with c2:
-            missing_total = safe_sum(profil.get("missing_count", {}))
-            st.markdown(f"""
-            <div class="kpi-tile" title="Nombre total de cellules vides / NA" style="background:#ffffff;">
-                <div class="kpi-left">
-                    <div class="kpi-label">Valeurs manquantes <span class="kpi-info">ℹ️</span></div>
-                    <div class="kpi-value">{missing_total}</div>
-                    <div class="kpi-sub">Total de NA</div>
-                </div>
-                <div style="font-size:36px;">❗</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # tile 3
-        with c3:
-            st.markdown(f"""
-            <div class="kpi-tile" title="Nombre de lignes strictement dupliquées" style="background:#118DFF;color:white;">
-                <div class="kpi-left">
-                    <div class="kpi-label">Doublons <span class="kpi-info">ℹ️</span></div>
-                    <div class="kpi-value">{profil.get('duplicate_rows', 0)}</div>
-                    <div class="kpi-sub">Lignes dupliquées</div>
-                </div>
-                <div style="font-size:36px;">📑</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        # tile 4
-        with c4:
-            cols_vide_const = len(profil.get("empty_columns", [])) + len(profil.get("constant_columns", []))
-            st.markdown(f"""
-            <div class="kpi-tile" title="Colonnes sans variance (constantes) ou totalement vides" style="background:#f6f6f6;">
-                <div class="kpi-left">
-                    <div class="kpi-label">Colonnes vides/constantes <span class="kpi-info">ℹ️</span></div>
-                    <div class="kpi-value">{cols_vide_const}</div>
-                    <div class="kpi-sub">Colonnes sans variance</div>
-                </div>
-                <div style="font-size:36px;">📦</div>
-            </div>
-            """, unsafe_allow_html=True)
-
-        st.markdown("---")
-
-        # Two heatmaps: outliers heatmap (if numeric) + missing corr heatmap
-        st.subheader("Visualisations avancées")
-
-        colA, colB = st.columns([1,1], gap="large")
-        out_fig = create_outliers_heatmap(profil)
-        missbar_fig = create_missing_bar(profil)
-        misscorr_fig = create_missing_corr_heatmap(df)
-        types_fig = create_types_pie(col_types)
-
-        with colA:
-            if out_fig:
-                st.markdown("**Heatmap — Outliers (IQR)**  ℹ️")
-                st.pyplot(out_fig)
-            else:
-                st.info("Aucune colonne numérique / outliers détectés pour cette dataset.")
-
-        with colB:
-            if missbar_fig:
-                st.markdown("**Top colonnes — Valeurs manquantes**  ℹ️")
-                st.pyplot(missbar_fig)
-            else:
-                st.info("Aucune valeur manquante significative détectée.")
-
-        st.markdown("---")
-        # Missing correlation heatmap (full)
-        if misscorr_fig:
-            st.subheader("Corrélation des patterns de valeurs manquantes")
-            st.pyplot(misscorr_fig)
-            st.info("Valeurs proches de 1 signifient que les colonnes manquent souvent ensemble.")
-        else:
-            st.info("Aucune corrélation de missingness (pas de NA détectées).")
-
-        # types pie
-        st.markdown("---")
-        st.subheader("Typologie des colonnes détectées")
-        st.pyplot(types_fig)
-
-        # Column profiling interactive (premium)
-        st.markdown("---")
-        st.subheader("Profiling détaillé par colonne")
-        col_selected = st.selectbox("Sélectionne une colonne", df.columns.tolist())
-        st.write("Type détecté:", col_types.get(col_selected, "unknown"))
-        st.write("Valeurs manquantes:", f"{df[col_selected].isna().sum()} ({df[col_selected].isna().mean()*100:.1f}%)")
-        st.write("Valeurs uniques:", df[col_selected].nunique(dropna=True))
-
-        if pd.api.types.is_numeric_dtype(df[col_selected]):
-            figc, (ax1, ax2) = plt.subplots(1,2, figsize=(12,4))
-            df[col_selected].dropna().hist(bins=30, ax=ax1, color="#118DFF", edgecolor="white")
-            ax1.set_title("Distribution")
-            df[col_selected].dropna().plot.box(ax=ax2)
-            ax2.set_title("Boxplot")
-            st.pyplot(figc)
-            st.write(df[col_selected].describe().to_frame())
-        else:
-            st.write(df[col_selected].value_counts().head(30).to_frame())
-
-        # Suggestions cleaning (quick wins)
-        st.markdown("---")
-        st.subheader("Suggestions de nettoyage automatiques (Quick Wins)")
-        suggestions = []
-        if profil.get("empty_columns"):
-            suggestions.append({"action":"Supprimer colonnes vides", "columns": profil["empty_columns"], "code":f"df = df.drop(columns={profil['empty_columns']})"})
-        if profil.get("constant_columns"):
-            suggestions.append({"action":"Supprimer constantes", "columns": profil["constant_columns"], "code":f"df = df.drop(columns={profil['constant_columns']})"})
-        if profil.get("duplicate_rows",0) > 0:
-            suggestions.append({"action":"Supprimer doublons", "columns":"Toutes", "code":"df = df.drop_duplicates()"})
-        # missing imputations per column (top ones)
-        missing_series = pd.Series(profil.get("missing_pct", {}))
-        high_missing = missing_series[missing_series > 0].sort_values(ascending=False).head(10)
-        for col_name, pct in high_missing.items():
-            if pd.api.types.is_numeric_dtype(df[col_name]):
-                code = f"df['{col_name}'].fillna(df['{col_name}'].median(), inplace=True)"
-            else:
-                code = f"df['{col_name}'].fillna(df['{col_name}'].mode()[0] if not df['{col_name}'].mode().empty else 'INCONNU', inplace=True)"
-            suggestions.append({"action":f"Imputer {col_name}", "columns":[col_name], "code":code})
-
-        if suggestions:
-            for s in suggestions:
-                st.write(f"- **{s['action']}** — Colonnes: {s['columns'] if 'columns' in s else 'N/A'}")
-            with st.expander("Voir le code des quick wins"):
-                code_text = "# Suggestions de nettoyage\n"
-                for s in suggestions:
-                    code_text += f"# {s['action']}\n{ s['code'] }\n\n"
-                st.code(code_text, language="python")
-        else:
-            st.success("Aucune action de nettoyage détectée — dataset propre !")
-
-        # -----------------------------------------------------------------------------
-        # OpenAI synthèse & tests
-        # -----------------------------------------------------------------------------
-        st.markdown("---")
-        st.subheader("Synthèse & Priorités (IA)")
-        col_ia1, col_ia2 = st.columns([1,3])
-        with col_ia1:
-            if openai_client is None:
-                st.info("Active OpenAI (OPENAI_API_KEY dans les secrets) pour avoir la synthèse IA.")
-            else:
-                if st.button("Générer la synthèse IA"):
-                    with st.spinner("Appel OpenAI en cours..."):
-                        try:
-                            synth_text = openai_synthesis_for_profile(openai_client, df, profil)
-                            st.markdown(synth_text)
-                        except Exception as e:
-                            st.error(f"Erreur OpenAI: {e}")
-        with col_ia2:
-            st.info("La synthèse IA produit une synthèse professionnelle, un tableau de priorisation et des quick wins.")
-
-        # Tests suggestions
-        st.markdown("---")
-        st.subheader("Tests complémentaires suggérés (IA)")
-        with st.spinner("Génération des tests recommandés..."):
-            if openai_client is None:
-                st.info("OpenAI non configuré → impossible de générer les tests IA.")
-            else:
-                if st.button("Générer les tests IA"):
-                    try:
-                        tests_text = openai_suggest_tests_for_schema(openai_client, df, profil, col_types)
-                        st.markdown(tests_text)
-                    except Exception as e:
-                        st.error(f"Erreur OpenAI tests: {e}")
-
-        # -----------------------------------------------------------------------------
-        # Export / PDF generation (HTML -> PDF via pdfkit if available)
-        # -----------------------------------------------------------------------------
-        st.markdown("---")
-        st.subheader("Export / Rapport")
-
-        # Prepare charts bytes
-        charts = {}
-        if out_fig:
-            charts["Outliers heatmap"] = fig_to_bytes(out_fig)
-        if missbar_fig:
-            charts["Missing top cols"] = fig_to_bytes(missbar_fig)
-        if misscorr_fig:
-            charts["Missing correlation"] = fig_to_bytes(misscorr_fig)
-        if types_fig:
-            charts["Types distribution"] = fig_to_bytes(types_fig)
-
-        # Get synthesis text if already generated else short local synthesis
-        synth_local = locals().get("synth_text", None)
-        if 'synth_text' in locals() and synth_text:
-            final_synth = synth_text
-        else:
-            # create small local synthesis fallback
-            final_synth = f"Dataset: {profil['rows']:,} lignes × {profil['cols']} colonnes. Score global: {profil['global_score']}%. Top missing: {', '.join(list(pd.Series(profil['missing_pct']).sort_values(ascending=False).head(3).index)) if profil['missing_pct'] else 'N/A'}"
-
-        html_report = generate_html_report(final_synth, profil, charts)
-
-        # Offer download HTML always
-        b64_html = base64.b64encode(html_report.encode()).decode()
-        st.markdown(f'<a href="data:text/html;base64,{b64_html}" download="report_data_quality.html">📄 Télécharger le rapport (HTML)</a>', unsafe_allow_html=True)
-
-        # Offer PDF if pdfkit available
-        if pdfkit_available:
-            if st.button("📄 Générer PDF (wkhtmltopdf)"):
-                with st.spinner("Conversion HTML → PDF en cours..."):
-                    try:
-                        pdf_bytes = export_pdf_from_html(html_report)
-                        if pdf_bytes:
-                            st.success("PDF prêt.")
-                            st.download_button(label="📥 Télécharger le rapport PDF", data=pdf_bytes, file_name=f"rapport_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf", mime="application/pdf")
-                        else:
-                            st.error("La conversion PDF a échoué (voir logs).")
-                    except Exception as e:
-                        st.error(f"Erreur conversion PDF: {e}")
-        else:
-            st.info("pdfkit/wkhtmltopdf non présent sur l'environnement — utilise le téléchargement HTML ou installe wkhtmltopdf pour PDF direct.")
-
-        # End of dataset flow
-
-# -----------------------------------------------------------------------------
-# End of app
-# -----------------------------------------------------------------------------
+st.success("Analyse terminée ✅")
