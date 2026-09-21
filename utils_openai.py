@@ -10,7 +10,7 @@ def get_openai_client(api_key: Optional[str] = None) -> OpenAI:
     Crée un client OpenAI.
     
     Args:
-        api_key: Clé API OpenAI (optionnel si définie en variable d'environnement)
+        api_key: Clé API OpenAI
         
     Returns:
         OpenAI: Client OpenAI initialisé
