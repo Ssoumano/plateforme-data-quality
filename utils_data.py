@@ -298,6 +298,88 @@ def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return df.drop(columns=to_drop).drop_duplicates()
 
 
+def score_label(score: float) -> str:
+    """Libellé qualitatif d'un score global (0-100)."""
+    if score >= 80:
+        return "Bonne qualité"
+    if score >= 60:
+        return "Qualité moyenne"
+    if score >= 40:
+        return "Qualité dégradée"
+    return "Qualité critique"
+
+
+def top_issues(profil: Dict, n: int = 3) -> list:
+    """Problèmes les plus importants, du plus grave au moins grave.
+
+    Returns:
+        list de dicts {"severity": 1-3 (3 = critique), "title", "detail"}
+    """
+    issues = []
+    missing_pct = profil["missing_pct"]
+
+    if profil["empty_columns"]:
+        issues.append({"severity": 3, "title": f"{len(profil['empty_columns'])} colonne(s) entièrement vide(s)",
+                       "detail": ", ".join(map(str, profil["empty_columns"][:5]))})
+    high_missing = [c for c in missing_pct.index if missing_pct[c] > 50 and c not in profil["empty_columns"]]
+    if high_missing:
+        issues.append({"severity": 3, "title": f"{len(high_missing)} colonne(s) avec plus de 50 % de valeurs manquantes",
+                       "detail": ", ".join(map(str, high_missing[:5]))})
+    if profil["duplicate_rate"] > 5:
+        issues.append({"severity": 3, "title": f"{profil['duplicate_rows']:,} lignes dupliquées",
+                       "detail": f"{profil['duplicate_rate']:.1f} % du fichier"})
+    elif profil["duplicate_rows"] > 0:
+        issues.append({"severity": 2, "title": f"{profil['duplicate_rows']:,} lignes dupliquées",
+                       "detail": f"{profil['duplicate_rate']:.1f} % du fichier"})
+    if profil["missing_rate"] > 10:
+        issues.append({"severity": 2, "title": f"{profil['missing_rate']:.1f} % de cellules manquantes",
+                       "detail": f"{profil['total_missing']:,} valeurs"})
+    if profil["constant_columns"]:
+        issues.append({"severity": 2, "title": f"{len(profil['constant_columns'])} colonne(s) constante(s)",
+                       "detail": ", ".join(map(str, profil["constant_columns"][:5]))})
+    cols_out = sorted(profil.get("outliers", {}).items(), key=lambda kv: -kv[1])
+    cols_out = [(c, n_) for c, n_ in cols_out if n_ > 0]
+    if cols_out:
+        issues.append({"severity": 1, "title": f"{profil.get('total_outliers', 0):,} valeurs aberrantes (IQR)",
+                       "detail": ", ".join(f"{c} ({n_})" for c, n_ in cols_out[:3])})
+    if profil["high_cardinality_cols"]:
+        issues.append({"severity": 1, "title": f"{len(profil['high_cardinality_cols'])} colonne(s) à haute cardinalité",
+                       "detail": ", ".join(map(str, profil["high_cardinality_cols"][:5]))})
+
+    issues.sort(key=lambda i: -i["severity"])
+    return issues[:n]
+
+
+def build_column_summary(df: pd.DataFrame, profil: Dict) -> pd.DataFrame:
+    """Tableau récapitulatif : une ligne par colonne, avec statut et alertes."""
+    rows = []
+    for col in df.columns:
+        missing = float(profil["missing_pct"][col])
+        ctype = profil["column_types"][col]
+        n_out = int(profil.get("outliers", {}).get(col, 0))
+        alerts = []
+        severity = 0
+        if col in profil["empty_columns"]:
+            alerts.append("vide"); severity = 3
+        elif col in profil["constant_columns"]:
+            alerts.append("constante"); severity = max(severity, 2)
+        if missing > 50 and col not in profil["empty_columns"]:
+            alerts.append(">50 % manquant"); severity = 3
+        elif missing > 10:
+            alerts.append(">10 % manquant"); severity = max(severity, 2)
+        if n_out > 0:
+            alerts.append(f"{n_out} outlier(s)"); severity = max(severity, 1)
+        if col in profil["high_cardinality_cols"]:
+            alerts.append("haute cardinalité"); severity = max(severity, 1)
+        status = {3: "🔴 Critique", 2: "🟠 À surveiller", 1: "🟡 Mineur", 0: "🟢 OK"}[severity]
+        rows.append({
+            "Colonne": str(col), "Statut": status, "Type": ctype,
+            "% manquant": missing, "Uniques": int(df[col].nunique(dropna=True)),
+            "Outliers": n_out, "Alertes": ", ".join(alerts) or "—",
+        })
+    return pd.DataFrame(rows)
+
+
 def generate_quick_wins(profil: Dict) -> list:
     """
     Génère une liste de Quick Wins basée sur le profil.

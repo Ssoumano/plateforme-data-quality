@@ -72,3 +72,36 @@ def test_pdf_and_html_reports_escape_and_build():
     assert "<script>alert(1)</script>" not in html
     assert "<b>x</b>" not in html
     assert utils_pdf.generate_pdf_bytes("## Synthèse ⚠️ **ok**", profil).startswith(b"%PDF")
+
+
+def _sample_profile():
+    df = pd.DataFrame({
+        "id": range(10),
+        "vide": [None] * 10,
+        "const": ["x"] * 10,
+        "val": [1, 2, 3, 4, 5, 6, 7, 8, 9, 1000],
+    })
+    return df, utils_data.profile_data_quality(df)
+
+
+def test_top_issues_sorted_by_severity():
+    _, profil = _sample_profile()
+    issues = utils_data.top_issues(profil, n=5)
+    severities = [i["severity"] for i in issues]
+    assert severities == sorted(severities, reverse=True)
+    assert issues[0]["severity"] == 3
+    assert len(utils_data.top_issues(profil, n=2)) == 2
+
+
+def test_column_summary_status():
+    df, profil = _sample_profile()
+    summary = utils_data.build_column_summary(df, profil).set_index("Colonne")
+    assert summary.loc["vide", "Statut"].startswith("🔴")
+    assert summary.loc["const", "Statut"].startswith("🟠")
+    assert summary.loc["id", "Statut"].startswith("🟢")
+    assert "outlier" in summary.loc["val", "Alertes"]
+
+
+def test_score_label():
+    assert utils_data.score_label(95) == "Bonne qualité"
+    assert utils_data.score_label(10) == "Qualité critique"

@@ -8,6 +8,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import html
 from datetime import datetime
 
 # Configuration de la page
@@ -112,40 +113,40 @@ def show_fig(fig):
 
 if page == "📊 Dashboard":
     
-    # En-tête
+    has_data = st.session_state.df is not None
+
+    # En-tête (compact une fois un fichier chargé, pour montrer le verdict sans scroller)
     st.title("📊 Data Quality Platform — PRO")
-    st.markdown("""
-    <p style='font-size: 1.1rem; color: #666; margin-bottom: 2rem;'>
-    Importez un fichier CSV ou Excel pour analyser automatiquement la qualité de vos données, 
-    obtenir des insights IA et des recommandations actionnables.
-    </p>
-    """, unsafe_allow_html=True)
-    
-    # Zone d'upload avec instructions
-    st.markdown("### 📁 Importer vos données")
-    
-    col_upload, col_info = st.columns([2, 1])
-    
-    with col_upload:
+    if not has_data:
+        st.markdown("""
+        <p style='font-size: 1.1rem; opacity: .75; margin-bottom: 1.5rem;'>
+        Importez un fichier CSV ou Excel pour analyser automatiquement la qualité de vos données,
+        obtenir des insights IA et des recommandations actionnables.
+        </p>
+        """, unsafe_allow_html=True)
+
+    uploader_cols = st.columns([2, 1]) if not has_data else [st.container()]
+    with uploader_cols[0]:
         uploaded_file = st.file_uploader(
-            "Glissez-déposez votre fichier ici",
+            "Importer un fichier" if has_data else "Glissez-déposez votre fichier ici",
             type=["csv", "xlsx", "xls"],
             help="Formats supportés: CSV, XLSX, XLS • Taille max: 200MB",
-            label_visibility="collapsed"
+            label_visibility="visible" if has_data else "collapsed",
         )
-    
-    with col_info:
-        st.info("""
-        **💡 Formats acceptés:**
-        - CSV (délimiteur auto-détecté)
-        - Excel (.xlsx, .xls)
-        
-        **📊 Analyses incluses:**
-        - Profiling automatique
-        - Détection d'anomalies
-        - Recommandations IA
-        """)
-    
+
+    if not has_data:
+        with uploader_cols[1]:
+            st.info("""
+            **💡 Formats acceptés:**
+            - CSV (délimiteur auto-détecté)
+            - Excel (.xlsx, .xls)
+
+            **📊 Analyses incluses:**
+            - Profiling automatique
+            - Détection d'anomalies
+            - Recommandations IA
+            """)
+
     # Si aucun fichier
     if uploaded_file is None and st.session_state.df is None:
         if True:
@@ -213,11 +214,12 @@ if page == "📊 Dashboard":
             st.session_state.synthesis = None
             st.session_state.tests = None
             st.session_state.cleaning_script = None
+            st.rerun()  # redessine l'en-tête en mode compact
 
     profil = st.session_state.profil
-    st.success(
-        f"✅ Fichier chargé : **{st.session_state.file_name}** "
-        f"({profil['rows']:,} lignes × {profil['cols']} colonnes)"
+    st.caption(
+        f"📄 **{st.session_state.file_name}** — "
+        f"{profil['rows']:,} lignes × {profil['cols']} colonnes"
     )
 
     df = st.session_state.df
@@ -225,65 +227,48 @@ if page == "📊 Dashboard":
     
     st.markdown("---")
     
-    # ==================== KPIs PRINCIPAUX ====================
-    
-    st.markdown("### 📈 Indicateurs Clés de Performance")
-    
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    
-    with col1:
-        st.metric("📊 Lignes", f"{profil['rows']:,}")
-    
-    with col2:
-        st.metric("📋 Colonnes", profil['cols'])
-    
-    with col3:
-        score = profil['global_score']
-        delta_color = "normal" if score >= 70 else "inverse"
-        st.metric(
-            "🎯 Score Global", 
-            f"{score}%",
-            delta=None,
-            delta_color=delta_color
-        )
-    
-    with col4:
-        st.metric(
-            "❌ Valeurs Manquantes",
-            f"{profil['total_missing']:,}",
-            delta=f"{profil['missing_rate']:.1f}%",
-            delta_color="inverse"
-        )
-    
-    with col5:
-        st.metric(
-            "🔄 Doublons",
-            profil['duplicate_rows'],
-            delta=f"{profil['duplicate_rate']:.1f}%",
-            delta_color="inverse"
-        )
-    
-    with col6:
-        st.metric(
-            "⚡ Outliers",
-            profil.get('total_outliers', 0)
-        )
-    
-    # Barre de progression du score
-    score_color = "#4CAF50" if score >= 80 else "#FFC107" if score >= 60 else "#FF9800" if score >= 40 else "#F44336"
-    
-    st.markdown(f"""
-    <div style='margin-top: 20px;'>
-        <div style='background: #e0e0e0; border-radius: 10px; height: 30px; overflow: hidden;'>
-            <div style='background: {score_color}; width: {score}%; height: 100%; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; transition: width 0.5s ease;'>
-                Score de Qualité: {score}%
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    
+    # ==================== VERDICT ====================
+
+    score = profil['global_score']
+    with st.container(border=True):
+        col_score, col_issues = st.columns([1, 2], gap="large")
+
+        with col_score:
+            st.caption("SCORE DE QUALITÉ")
+            st.markdown(f"## {score:.0f} / 100")
+            st.markdown(f"**{utils_data.score_label(score)}**")
+            st.progress(min(max(score / 100, 0.0), 1.0))
+            with st.expander("Comment est calculé le score ?"):
+                details = profil["score_details"]
+                st.table(pd.DataFrame({
+                    "Composante": ["Valeurs manquantes", "Doublons", "Outliers", "Colonnes vides/constantes"],
+                    "Poids": ["40 %", "25 %", "20 %", "15 %"],
+                    "Note /100": [details["missing_score"], details["duplicate_score"],
+                                  details["outlier_score"], details["problematic_columns_score"]],
+                }).set_index("Composante"))
+
+        with col_issues:
+            st.caption("PRINCIPAUX PROBLÈMES")
+            issues = utils_data.top_issues(profil)
+            if not issues:
+                st.success("Aucun problème majeur détecté.")
+            icons = {3: "🔴", 2: "🟠", 1: "🟡"}
+            for issue in issues:
+                st.markdown(f"{icons[issue['severity']]} **{issue['title']}**  \n"
+                            f"<span style='opacity:.7'>{html.escape(issue['detail'])}</span>",
+                            unsafe_allow_html=True)
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Lignes", f"{profil['rows']:,}")
+    col2.metric("Colonnes", profil['cols'])
+    col3.metric("Valeurs manquantes", f"{profil['total_missing']:,}",
+                delta=f"{profil['missing_rate']:.1f} %", delta_color="inverse")
+    col4.metric("Doublons", f"{profil['duplicate_rows']:,}",
+                delta=f"{profil['duplicate_rate']:.1f} %", delta_color="inverse")
+    col5.metric("Outliers", f"{profil.get('total_outliers', 0):,}")
+
     st.markdown("---")
-    
+
     # ==================== ONGLETS D'ANALYSE ====================
     
     tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
@@ -380,13 +365,44 @@ if page == "📊 Dashboard":
     with tab3:
         st.markdown("### 🔍 Profiling Détaillé par Colonne")
         
-        col_select = st.selectbox(
-            "📋 Sélectionnez une colonne à analyser",
-            list(df.columns),
-            help="Choisissez une colonne pour voir ses statistiques détaillées"
+        summary = utils_data.build_column_summary(df, profil)
+
+        f1, f2, f3 = st.columns([2, 2, 1])
+        search = f1.text_input("Rechercher une colonne", placeholder="nom de colonne…")
+        types_sel = f2.multiselect("Type", sorted(summary["Type"].unique()))
+        only_issues = f3.toggle("Problèmes seuls", value=False)
+
+        view = summary
+        if search:
+            view = view[view["Colonne"].str.contains(search, case=False, regex=False)]
+        if types_sel:
+            view = view[view["Type"].isin(types_sel)]
+        if only_issues:
+            view = view[view["Statut"] != "🟢 OK"]
+        view = view.sort_values("Statut", key=lambda c: c.map(
+            {"🔴 Critique": 0, "🟠 À surveiller": 1, "🟡 Mineur": 2, "🟢 OK": 3})).reset_index(drop=True)
+
+        st.caption(f"{len(view)} colonne(s) sur {len(summary)} — cliquez sur une ligne pour le détail.")
+        event = st.dataframe(
+            view, hide_index=True, width="stretch", height=min(400, 38 + 35 * max(len(view), 1)),
+            on_select="rerun", selection_mode="single-row",
+            column_config={
+                "% manquant": st.column_config.ProgressColumn(
+                    "% manquant", min_value=0, max_value=100, format="%.1f %%"),
+            },
         )
-        
-        if col_select:
+
+        selected_rows = event.selection.rows if event and event.selection else []
+        if selected_rows and selected_rows[0] < len(view):
+            col_select = view.loc[selected_rows[0], "Colonne"]
+        elif len(view):
+            col_select = view.loc[0, "Colonne"]
+        else:
+            col_select = None
+            st.info("Aucune colonne ne correspond aux filtres.")
+
+        if col_select is not None:
+            col_select = next(c for c in df.columns if str(c) == col_select)
             st.markdown(f"#### Analyse de : **{col_select}**")
             
             # Informations de base
@@ -408,7 +424,9 @@ if page == "📊 Dashboard":
             st.markdown("---")
             
             # Visualisations selon le type
-            if pd.api.types.is_numeric_dtype(df[col_select]):
+            if df[col_select].dropna().empty:
+                st.info("Cette colonne est entièrement vide : aucun graphique à afficher.")
+            elif pd.api.types.is_numeric_dtype(df[col_select]):
                 col_num1, col_num2 = st.columns(2)
                 
                 fig_dist, fig_box = charts.create_numeric_charts(df[col_select], col_select)
