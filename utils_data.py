@@ -3,6 +3,7 @@
 import pandas as pd
 import numpy as np
 import io
+import warnings
 from typing import Dict, Optional, Tuple
 
 
@@ -36,32 +37,29 @@ def load_dataframe(uploaded_file) -> Optional[pd.DataFrame]:
         uploaded_file: Fichier Streamlit uploadé
         
     Returns:
-        pd.DataFrame ou None si échec
+        pd.DataFrame, ou None si aucun fichier.
+
+    Raises:
+        ValueError / pandas errors si le fichier est illisible.
     """
     if uploaded_file is None:
         return None
         
-    try:
-        data = uploaded_file.getvalue()
-        name = uploaded_file.name.lower()
+    data = uploaded_file.getvalue()
+    name = uploaded_file.name.lower()
 
-        if name.endswith(".csv"):
-            sep = detect_separator(data)
-            return pd.read_csv(
-                io.BytesIO(data), 
-                sep=sep, 
-                engine="python",
-                encoding_errors='ignore'
-            )
-        elif name.endswith((".xls", ".xlsx")):
-            return pd.read_excel(io.BytesIO(data))
-        else:
-            # Tentative de lecture comme CSV par défaut
-            return pd.read_csv(io.BytesIO(data), encoding_errors='ignore')
-            
-    except Exception as e:
-        print(f"Erreur lors du chargement du fichier: {e}")
-        return None
+    if name.endswith(".csv"):
+        sep = detect_separator(data)
+        # Encodage : UTF-8 (avec BOM) d'abord, puis latin-1 sans perte silencieuse
+        for encoding in ("utf-8-sig", "latin-1"):
+            try:
+                return pd.read_csv(io.BytesIO(data), sep=sep, encoding=encoding)
+            except UnicodeDecodeError:
+                continue
+        raise ValueError("Encodage du fichier CSV non reconnu.")
+    if name.endswith((".xls", ".xlsx")):
+        return pd.read_excel(io.BytesIO(data))
+    raise ValueError("Format non supporté (CSV, XLS ou XLSX attendu).")
 
 
 def safe_numeric(df: pd.DataFrame) -> pd.DataFrame:
@@ -92,17 +90,27 @@ def detect_column_type(series: pd.Series) -> str:
     if series.isna().all():
         return "empty"
     
-    # Vérifier si c'est une date
-    try:
-        conv = pd.to_datetime(series, errors="coerce")
-        if conv.notna().sum() > len(series) * 0.75:
-            return "datetime"
-    except:
-        pass
-    
-    # Vérifier si c'est numérique
+    # Types déjà natifs : traités avant toute conversion
+    if pd.api.types.is_bool_dtype(series):
+        return "binary"
+    if pd.api.types.is_datetime64_any_dtype(series):
+        return "datetime"
     if pd.api.types.is_numeric_dtype(series):
         return "numeric"
+
+    # Colonnes texte : tenter une conversion en date
+    # (les entiers ne sont plus convertis en timestamps par erreur)
+    non_null = series.dropna()
+    if len(non_null) > 0:
+        try:
+            sample = non_null.astype(str).head(1000)
+            with warnings.catch_warnings():
+                warnings.simplefilter("ignore")
+                conv = pd.to_datetime(sample, errors="coerce")
+            if conv.notna().mean() > 0.75:
+                return "datetime"
+        except (ValueError, TypeError, OverflowError):
+            pass
     
     # Vérifier si c'est binaire (2 valeurs uniques)
     unique_count = series.nunique(dropna=True)
@@ -164,7 +172,7 @@ def profile_data_quality(df: pd.DataFrame) -> Dict:
     profil["missing_count"] = df.isna().sum()
     profil["missing_pct"] = (df.isna().mean() * 100).round(2)
     profil["total_missing"] = int(df.isna().sum().sum())
-    profil["missing_rate"] = round((profil["total_missing"] / (df.shape[0] * df.shape[1])) * 100, 2)
+    profil["missing_rate"] = round((profil["total_missing"] / max(1, df.shape[0] * df.shape[1])) * 100, 2)
     
     # ===== TYPES DE DONNÉES =====
     profil["dtypes"] = df.dtypes.astype(str)
@@ -201,6 +209,7 @@ def profile_data_quality(df: pd.DataFrame) -> Dict:
         profil["numeric_stats"] = pd.DataFrame()
         profil["outliers"] = {}
         profil["outlier_indices"] = {}
+        profil["total_outliers"] = 0
     else:
         profil["numeric_stats"] = numeric.describe().T
         
@@ -279,6 +288,12 @@ def profile_data_quality(df: pd.DataFrame) -> Dict:
     profil["recommendations"] = recommendations if recommendations else ["✅ Aucun problème majeur détecté"]
     
     return profil
+
+
+def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """Nettoyage minimal : supprime colonnes vides/constantes et doublons."""
+    to_drop = [c for c in df.columns if df[c].nunique(dropna=True) <= 1]
+    return df.drop(columns=to_drop).drop_duplicates()
 
 
 def generate_quick_wins(profil: Dict) -> list:

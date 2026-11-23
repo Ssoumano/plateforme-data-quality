@@ -112,27 +112,23 @@ Utilise le markdown avec des sections claires, des tableaux, et des listes à pu
 Sois concret, actionnable et professionnel.
 """
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "Tu es un consultant expert en Data Quality avec une expertise approfondie en analyse de données, data engineering et gouvernance des données. Tu fournis des analyses professionnelles, actionnables et orientées business."
-                },
-                {
-                    "role": "user", 
-                    "content": prompt
-                }
-            ],
-            max_tokens=1500,
-            temperature=0.7
-        )
-        
-        return response.choices[0].message.content
-        
-    except Exception as e:
-        return f"❌ **Erreur lors de la génération de la synthèse:**\n\n{str(e)}"
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system", 
+                "content": "Tu es un consultant expert en Data Quality avec une expertise approfondie en analyse de données, data engineering et gouvernance des données. Tu fournis des analyses professionnelles, actionnables et orientées business."
+            },
+            {
+                "role": "user", 
+                "content": prompt
+            }
+        ],
+        max_tokens=1500,
+        temperature=0.7
+    )
+    
+    return response.choices[0].message.content
 
 
 def generate_tests(client: OpenAI, df: pd.DataFrame) -> str:
@@ -199,27 +195,23 @@ Sois **TRÈS SPÉCIFIQUE** aux colonnes et types de ce dataset.
 Fournis du code Python **EXÉCUTABLE** utilisant pandas.
 """
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Tu es un expert en tests de qualité de données et en validation de datasets. Tu crées des tests concrets, exécutables et adaptés au contexte spécifique de chaque dataset."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            max_tokens=2000,
-            temperature=0.6
-        )
-        
-        return response.choices[0].message.content
-        
-    except Exception as e:
-        return f"❌ **Erreur lors de la génération des tests:**\n\n{str(e)}"
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": "Tu es un expert en tests de qualité de données et en validation de datasets. Tu crées des tests concrets, exécutables et adaptés au contexte spécifique de chaque dataset."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        max_tokens=2000,
+        temperature=0.6
+    )
+    
+    return response.choices[0].message.content
 
 
 def generate_cleaning_script(client: OpenAI, df: pd.DataFrame, profil: Dict) -> str:
@@ -269,24 +261,20 @@ Le script doit:
 Format: Code Python pur avec commentaires détaillés.
 """
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Tu es un expert en data cleaning et préparation de données. Tu écris du code Python propre, commenté et exécutable."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            max_tokens=1500,
-            temperature=0.5
-        )
-        
-        return response.choices[0].message.content
-        
-    except Exception as e:
-        return f"# Erreur lors de la génération du script:\n# {str(e)}"
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {
+                "role": "system",
+                "content": "Tu es un expert en data cleaning et préparation de données. Tu écris du code Python propre, commenté et exécutable."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        max_tokens=1500,
+        temperature=0.5
+    )
+    
+    return response.choices[0].message.content

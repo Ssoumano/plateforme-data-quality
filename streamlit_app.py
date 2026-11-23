@@ -55,6 +55,10 @@ if 'tests' not in st.session_state:
     st.session_state.tests = None
 if 'file_uploaded' not in st.session_state:
     st.session_state.file_uploaded = False
+if 'file_key' not in st.session_state:
+    st.session_state.file_key = None
+if 'file_name' not in st.session_state:
+    st.session_state.file_name = None
 
 
 # ==================== CONFIGURATION OPENAI ====================
@@ -66,7 +70,7 @@ if utils_openai is not None:
         else:
             try:
                 openai_client = utils_openai.get_openai_client()
-            except:
+            except Exception:
                 pass
     except Exception as e:
         st.sidebar.error(f"Erreur OpenAI: {e}")
@@ -102,6 +106,12 @@ Version 2.0
 
 
 # ==================== FONCTIONS UTILITAIRES ====================
+
+def show_fig(fig):
+    """Affiche une figure matplotlib puis la ferme (évite la fuite mémoire)."""
+    st.pyplot(fig)
+    plt.close(fig)
+
 
 def create_missing_chart(profil, top_n=10):
     """Crée un graphique des colonnes avec le plus de valeurs manquantes."""
@@ -254,8 +264,8 @@ if page == "📊 Dashboard":
         """)
     
     # Si aucun fichier
-    if uploaded_file is None:
-        if not st.session_state.file_uploaded:
+    if uploaded_file is None and st.session_state.df is None:
+        if True:
             st.markdown("---")
             st.markdown("### 🎯 Comment ça marche ?")
             
@@ -301,29 +311,31 @@ if page == "📊 Dashboard":
     
     # ==================== CHARGEMENT DES DONNÉES ====================
     
-    # Message de chargement
-    with st.spinner("⏳ Chargement et analyse du fichier..."):
-        try:
-            df = utils_data.load_dataframe(uploaded_file)
-            
-            if df is None:
-                st.error("❌ Impossible de lire le fichier. Vérifiez le format et l'encodage.")
-                st.stop()
-            
-            # Stockage en session state
-            st.session_state.df = df
+    # Chargement + profiling : uniquement quand le fichier change
+    if uploaded_file is not None:
+        file_key = (uploaded_file.name, uploaded_file.size)
+        if file_key != st.session_state.file_key:
+            with st.spinner("⏳ Chargement et analyse du fichier..."):
+                try:
+                    new_df = utils_data.load_dataframe(uploaded_file)
+                    new_profil = utils_data.profile_data_quality(new_df)
+                except Exception as e:
+                    st.error(f"❌ Impossible de lire le fichier : {e}")
+                    st.stop()
+            st.session_state.df = new_df
+            st.session_state.profil = new_profil
+            st.session_state.file_key = file_key
+            st.session_state.file_name = uploaded_file.name
             st.session_state.file_uploaded = True
-            
-            # Profiling
-            profil = utils_data.profile_data_quality(df)
-            st.session_state.profil = profil
-            
-            st.success(f"✅ Fichier chargé avec succès: **{uploaded_file.name}** ({profil['rows']:,} lignes × {profil['cols']} colonnes)")
-            
-        except Exception as e:
-            st.error(f"❌ Erreur lors du chargement: {str(e)}")
-            st.stop()
-    
+            st.session_state.synthesis = None
+            st.session_state.tests = None
+
+    profil = st.session_state.profil
+    st.success(
+        f"✅ Fichier chargé : **{st.session_state.file_name}** "
+        f"({profil['rows']:,} lignes × {profil['cols']} colonnes)"
+    )
+
     df = st.session_state.df
     profil = st.session_state.profil
     
@@ -406,7 +418,11 @@ if page == "📊 Dashboard":
         # Options d'affichage
         col_opt1, col_opt2 = st.columns([1, 3])
         with col_opt1:
-            n_rows = st.slider("Nombre de lignes", 10, min(500, len(df)), 50)
+            max_rows = min(500, len(df))
+            if max_rows > 10:
+                n_rows = st.slider("Nombre de lignes", 10, max_rows, min(50, max_rows))
+            else:
+                n_rows = max_rows
         
         st.dataframe(df.head(n_rows), use_container_width=True, height=400)
         
@@ -443,21 +459,21 @@ if page == "📊 Dashboard":
             st.markdown("#### 🔴 Valeurs Manquantes")
             fig_missing = create_missing_chart(profil)
             if fig_missing:
-                st.pyplot(fig_missing)
+                show_fig(fig_missing)
             else:
                 st.success("✅ Aucune valeur manquante significative!")
         
         with col_viz2:
             st.markdown("#### 🎨 Distribution des Types")
             fig_types = create_types_chart(profil['column_types'])
-            st.pyplot(fig_types)
+            show_fig(fig_types)
         
         # Heatmap des outliers
         st.markdown("#### ⚡ Heatmap des Outliers (IQR)")
         fig_outliers = create_outliers_heatmap(profil)
         
         if fig_outliers:
-            st.pyplot(fig_outliers)
+            show_fig(fig_outliers)
         else:
             st.info("ℹ️ Aucun outlier détecté ou pas de colonnes numériques.")
         
@@ -476,7 +492,7 @@ if page == "📊 Dashboard":
                 linewidths=0.5
             )
             ax_corr.set_title("Corrélations entre variables numériques", fontsize=14, fontweight='bold', pad=15)
-            st.pyplot(fig_corr)
+            show_fig(fig_corr)
     
     # ====== TAB 3: PROFILING DÉTAILLÉ ======
     with tab3:
@@ -521,7 +537,7 @@ if page == "📊 Dashboard":
                     ax_dist.set_ylabel("Fréquence")
                     ax_dist.set_title(f"Distribution de {col_select}")
                     ax_dist.grid(alpha=0.3)
-                    st.pyplot(fig_dist)
+                    show_fig(fig_dist)
                 
                 with col_num2:
                     st.markdown("**📦 Boxplot**")
@@ -530,7 +546,7 @@ if page == "📊 Dashboard":
                     ax_box.set_ylabel(col_select)
                     ax_box.set_title(f"Boxplot de {col_select}")
                     ax_box.grid(axis='y', alpha=0.3)
-                    st.pyplot(fig_box)
+                    show_fig(fig_box)
                 
                 # Statistiques descriptives
                 st.markdown("**📈 Statistiques Descriptives**")
@@ -547,7 +563,7 @@ if page == "📊 Dashboard":
                 ax_cat.set_title(f"Top 20 valeurs de {col_select}")
                 ax_cat.invert_yaxis()
                 ax_cat.grid(axis='x', alpha=0.3)
-                st.pyplot(fig_cat)
+                show_fig(fig_cat)
                 
                 st.dataframe(value_counts.to_frame("Fréquence"), use_container_width=True)
     
@@ -617,8 +633,8 @@ if page == "📊 Dashboard":
         st.info("""
         💡 **Options d'export disponibles:**
         - Rapport HTML complet (recommandé)
-        - Rapport PDF (si pdfkit est installé)
-        - Données nettoyées (CSV)
+        - Rapport PDF (si pdfkit et wkhtmltopdf sont installés)
+        - Données nettoyées (CSV : colonnes vides/constantes et doublons retirés)
         """)
         
         # Générer le rapport
@@ -642,16 +658,19 @@ if page == "📊 Dashboard":
                             st.error(f"❌ Erreur lors de la génération: {str(e)}")
             
             with col_export2:
-                # Export des données nettoyées
-                if st.button("💾 Exporter les Données (CSV)", use_container_width=True):
-                    csv = df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="⬇️ Télécharger CSV",
-                        data=csv,
-                        file_name=f"data_cleaned_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv",
-                        use_container_width=True
-                    )
+                # Export des données nettoyées (colonnes vides/constantes et doublons retirés)
+                cleaned = utils_data.clean_dataframe(df)
+                st.download_button(
+                    label="💾 Télécharger les données nettoyées (CSV)",
+                    data=cleaned.to_csv(index=False).encode('utf-8'),
+                    file_name=f"data_cleaned_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                    mime="text/csv",
+                    use_container_width=True
+                )
+                st.caption(
+                    f"{len(df) - len(cleaned):,} ligne(s) et "
+                    f"{df.shape[1] - cleaned.shape[1]} colonne(s) retirées."
+                )
         else:
             st.warning("⚠️ Module utils_pdf non disponible. Export limité.")
 
@@ -705,23 +724,11 @@ elif page == "📞 Contact":
     
     st.markdown("---")
     
-    # Formulaire de contact (optionnel)
-    st.markdown("### ✉️ Envoyez un Message")
-    
-    with st.form("contact_form"):
-        name = st.text_input("Nom", placeholder="Votre nom")
-        email = st.text_input("Email", placeholder="votre.email@example.com")
-        subject = st.text_input("Sujet", placeholder="Sujet de votre message")
-        message = st.text_area("Message", placeholder="Votre message...", height=150)
-        
-        submitted = st.form_submit_button("📤 Envoyer", use_container_width=True)
-        
-        if submitted:
-            if name and email and message:
-                st.success("✅ Message envoyé! Je vous répondrai dans les plus brefs délais.")
-                st.balloons()
-            else:
-                st.error("❌ Veuillez remplir tous les champs.")
+    st.markdown("### ✉️ Envoyer un message")
+    st.markdown(
+        "Écrivez-moi directement : "
+        "[soumanoseydou@icloud.com](mailto:soumanoseydou@icloud.com?subject=Data%20Quality%20Platform)"
+    )
 
 
 # ==================== FOOTER ====================

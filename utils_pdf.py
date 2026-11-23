@@ -1,6 +1,7 @@
 # utils_pdf.py
 
 import base64
+import html as html_lib
 from typing import Dict, Optional
 from datetime import datetime
 import pandas as pd
@@ -398,7 +399,7 @@ def generate_pdf_html(synthesis: str, profil: Dict, df: Optional[pd.DataFrame] =
             <div class="section">
                 <h2>📝 Synthèse Détaillée</h2>
                 <div class="synthesis-box">
-                    {synthesis.replace(chr(10), '<br>')}
+                    {html_lib.escape(synthesis).replace(chr(10), '<br>')}
                 </div>
             </div>
             
