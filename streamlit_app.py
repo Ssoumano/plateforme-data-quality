@@ -7,41 +7,25 @@ Application Streamlit pour l'analyse de la qualité des données
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
-import seaborn as sns
+import html
 from datetime import datetime
 
 # Configuration de la page
 st.set_page_config(
-    page_title="Data Quality Platform - PRO",
+    page_title="Data Quality Platform",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="auto"
 )
 
 # Import des modules utilitaires
-try:
-    import styles
-    st.markdown(styles.POWERBI_CSS, unsafe_allow_html=True)
-except ImportError:
-    st.warning("⚠️ Module styles.py non trouvé. Styles par défaut utilisés.")
+import charts
+import styles
+import utils_data
+import utils_openai
+import utils_pdf
 
-try:
-    import utils_data
-except ImportError:
-    st.error("❌ Module utils_data.py requis mais non trouvé!")
-    st.stop()
-
-try:
-    import utils_openai
-except ImportError:
-    utils_openai = None
-    st.sidebar.warning("⚠️ Module utils_openai.py non trouvé. Fonctions IA désactivées.")
-
-try:
-    import utils_pdf
-except ImportError:
-    utils_pdf = None
+st.markdown(styles.APP_CSS, unsafe_allow_html=True)
 
 
 # ==================== INITIALISATION SESSION STATE ====================
@@ -55,209 +39,112 @@ if 'tests' not in st.session_state:
     st.session_state.tests = None
 if 'file_uploaded' not in st.session_state:
     st.session_state.file_uploaded = False
+if 'file_key' not in st.session_state:
+    st.session_state.file_key = None
+if 'file_name' not in st.session_state:
+    st.session_state.file_name = None
 
 
 # ==================== CONFIGURATION OPENAI ====================
 openai_client = None
-if utils_openai is not None:
-    try:
-        if "OPENAI_API_KEY" in st.secrets:
-            openai_client = utils_openai.get_openai_client(st.secrets["OPENAI_API_KEY"])
-        else:
-            try:
-                openai_client = utils_openai.get_openai_client()
-            except:
-                pass
-    except Exception as e:
-        st.sidebar.error(f"Erreur OpenAI: {e}")
+try:
+    if "OPENAI_API_KEY" in st.secrets:
+        openai_client = utils_openai.get_openai_client(st.secrets["OPENAI_API_KEY"])
+    else:
+        openai_client = utils_openai.get_openai_client()
+except Exception:
+    openai_client = None  # clé absente ou invalide : IA désactivée
+
+try:
+    openai_model = st.secrets.get("OPENAI_MODEL", utils_openai.DEFAULT_MODEL)
+except Exception:
+    openai_model = utils_openai.DEFAULT_MODEL
 
 
-# ==================== SIDEBAR NAVIGATION ====================
-st.sidebar.title("🧭 Navigation")
-st.sidebar.markdown("---")
+# ==================== SIDEBAR ====================
+st.sidebar.markdown("## Data Quality")
+st.sidebar.caption("Analyse automatique de la qualité de vos données")
 
-page = st.sidebar.radio(
-    "Aller à",
-    ["📊 Dashboard", "📞 Contact"],
-    label_visibility="collapsed"
-)
+page = st.sidebar.radio("Navigation", ["Dashboard", "Contact"], label_visibility="collapsed")
 
-st.sidebar.markdown("---")
-
-# Informations sur le statut
+st.sidebar.divider()
+st.sidebar.markdown("**Assistant IA**")
 if openai_client:
-    st.sidebar.success("✅ IA activée")
+    st.sidebar.caption("● Activé")
+    send_samples = st.sidebar.toggle(
+        "Envoyer des exemples de valeurs",
+        value=False,
+        help="Désactivé : seules des statistiques agrégées (noms de colonnes, types, taux de "
+             "manquants) sont transmises à OpenAI. Activé : 2-3 valeurs par colonne sont aussi "
+             "envoyées. À éviter pour des données personnelles ou confidentielles.",
+    )
+    st.sidebar.caption("Les données du fichier ne quittent l'application que lors d'un appel IA.")
 else:
-    st.sidebar.warning("⚠️ IA désactivée")
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 📌 À propos")
-st.sidebar.info("""
-**Data Quality Platform - PRO**
-
-Analysez la qualité de vos données avec des insights IA et des recommandations actionnables.
-
-Version 2.0
-""")
+    send_samples = False
+    st.sidebar.caption("○ Désactivé — ajoutez une clé `OPENAI_API_KEY` dans les secrets.")
 
 
 # ==================== FONCTIONS UTILITAIRES ====================
 
-def create_missing_chart(profil, top_n=10):
-    """Crée un graphique des colonnes avec le plus de valeurs manquantes."""
-    mp = profil["missing_pct"]
-    if isinstance(mp, dict):
-        mp = pd.Series(mp)
-    
-    mp = mp[mp > 0].sort_values(ascending=False).head(top_n)
-    
-    if mp.empty or mp.sum() == 0:
-        return None
-    
-    fig, ax = plt.subplots(figsize=(10, max(5, len(mp) * 0.4)))
-    
-    # Couleurs basées sur le niveau de sévérité
-    colors_list = [
-        '#F44336' if x > 50 else 
-        '#FF9800' if x > 30 else 
-        '#FFC107' if x > 10 else 
-        '#4CAF50' 
-        for x in mp.values
-    ]
-    
-    mp.plot(kind='barh', ax=ax, color=colors_list, edgecolor='white', linewidth=1.5)
-    ax.set_xlabel("Pourcentage de valeurs manquantes (%)", fontsize=11, fontweight='bold')
-    ax.set_title(f"Top {len(mp)} colonnes avec valeurs manquantes", fontsize=13, fontweight='bold', pad=15)
-    ax.invert_yaxis()
-    ax.grid(axis='x', alpha=0.3, linestyle='--')
-    
-    # Ajouter les valeurs sur les barres
-    for i, v in enumerate(mp.values):
-        ax.text(v + 1, i, f"{v:.1f}%", va='center', fontweight='bold', fontsize=10)
-    
-    plt.tight_layout()
-    return fig
+def show_fig(fig):
+    """Affiche une figure Plotly interactive."""
+    st.plotly_chart(fig, width="stretch")
 
 
-def create_types_chart(col_types):
-    """Crée un pie chart de la distribution des types de colonnes."""
-    s = pd.Series(col_types).value_counts()
-    
-    fig, ax = plt.subplots(figsize=(8, 6))
-    
-    colors = ['#2196F3', '#4CAF50', '#FFC107', '#F44336', '#9C27B0', '#00BCD4']
-    explode = [0.05] * len(s)
-    
-    wedges, texts, autotexts = ax.pie(
-        s,
-        autopct="%1.1f%%",
-        startangle=90,
-        colors=colors[:len(s)],
-        explode=explode,
-        shadow=True,
-        textprops={'fontsize': 11, 'fontweight': 'bold'}
+def score_bar(score: float):
+    """Barre de score colorée selon le niveau (rouge → vert)."""
+    color = "#4CAF50" if score >= 80 else "#FFC107" if score >= 60 else "#FF9800" if score >= 40 else "#F44336"
+    st.markdown(
+        f"<div style='background:rgba(128,128,128,.25);border-radius:8px;height:12px;overflow:hidden'>"
+        f"<div style='background:{color};width:{min(max(score, 0), 100)}%;height:100%'></div></div>",
+        unsafe_allow_html=True,
     )
-    
-    ax.legend(wedges, s.index, title="Types", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1))
-    ax.set_title("Distribution des types de colonnes", fontsize=14, fontweight='bold', pad=20)
-    
-    plt.tight_layout()
-    return fig
 
-
-def create_outliers_heatmap(profil):
-    """Crée une heatmap des outliers par colonne."""
-    outliers = profil.get("outliers", {})
-    
-    if not outliers or all(v == 0 for v in outliers.values()):
-        return None
-    
-    # Filtrer les colonnes avec outliers
-    outliers_filtered = {k: v for k, v in outliers.items() if v > 0}
-    
-    if not outliers_filtered:
-        return None
-    
-    outlier_df = pd.DataFrame(
-        list(outliers_filtered.items()), 
-        columns=["Colonne", "Nb Outliers"]
-    ).set_index("Colonne")
-    
-    fig, ax = plt.subplots(figsize=(10, max(3, len(outlier_df) * 0.5)))
-    
-    sns.heatmap(
-        outlier_df,
-        annot=True,
-        fmt="d",
-        cmap="Reds",
-        ax=ax,
-        cbar_kws={"label": "Nombre d'outliers"},
-        linewidths=1,
-        linecolor='white'
-    )
-    
-    ax.set_title("Détection d'outliers (méthode IQR)", fontsize=13, fontweight='bold', pad=15)
-    plt.tight_layout()
-    
-    return fig
-
-
-def display_kpi_metric(label, value, subtitle=None, color_class="info"):
-    """Affiche une métrique KPI stylisée."""
-    subtitle_html = f'<div class="kpi-subtitle">{subtitle}</div>' if subtitle else ''
-    
-    st.markdown(f"""
-    <div class="kpi-tile {color_class}">
-        <div class="kpi-label">{label}</div>
-        <div class="kpi-value">{value}</div>
-        {subtitle_html}
-    </div>
-    """, unsafe_allow_html=True)
 
 
 # ==================== PAGE: DASHBOARD ====================
 
-if page == "📊 Dashboard":
+if page == "Dashboard":
     
-    # En-tête
-    st.title("📊 Data Quality Platform — PRO")
-    st.markdown("""
-    <p style='font-size: 1.1rem; color: #666; margin-bottom: 2rem;'>
-    Importez un fichier CSV ou Excel pour analyser automatiquement la qualité de vos données, 
-    obtenir des insights IA et des recommandations actionnables.
-    </p>
-    """, unsafe_allow_html=True)
-    
-    # Zone d'upload avec instructions
-    st.markdown("### 📁 Importer vos données")
-    
-    col_upload, col_info = st.columns([2, 1])
-    
-    with col_upload:
+    has_data = st.session_state.df is not None
+
+    # En-tête (compact une fois un fichier chargé, pour montrer le verdict sans scroller)
+    st.title("Data Quality Platform")
+    if not has_data:
+        st.markdown("""
+        <p style='font-size: 1.1rem; opacity: .75; margin-bottom: 1.5rem;'>
+        Importez un fichier CSV ou Excel pour analyser automatiquement la qualité de vos données,
+        obtenir des insights IA et des recommandations actionnables.
+        </p>
+        """, unsafe_allow_html=True)
+
+    uploader_cols = st.columns([2, 1]) if not has_data else [st.container()]
+    with uploader_cols[0]:
         uploaded_file = st.file_uploader(
-            "Glissez-déposez votre fichier ici",
+            "Importer un fichier" if has_data else "Glissez-déposez votre fichier ici",
             type=["csv", "xlsx", "xls"],
             help="Formats supportés: CSV, XLSX, XLS • Taille max: 200MB",
-            label_visibility="collapsed"
+            label_visibility="visible" if has_data else "collapsed",
         )
-    
-    with col_info:
-        st.info("""
-        **💡 Formats acceptés:**
-        - CSV (délimiteur auto-détecté)
-        - Excel (.xlsx, .xls)
-        
-        **📊 Analyses incluses:**
-        - Profiling automatique
-        - Détection d'anomalies
-        - Recommandations IA
-        """)
-    
+
+    if not has_data:
+        with uploader_cols[1]:
+            st.info("""
+            **Formats acceptés**
+            - CSV (délimiteur auto-détecté)
+            - Excel (.xlsx, .xls)
+
+            **Analyses incluses**
+            - Profiling automatique
+            - Détection d'anomalies
+            - Recommandations IA
+            """)
+
     # Si aucun fichier
-    if uploaded_file is None:
-        if not st.session_state.file_uploaded:
+    if uploaded_file is None and st.session_state.df is None:
+        if True:
             st.markdown("---")
-            st.markdown("### 🎯 Comment ça marche ?")
+            st.markdown("### Comment ça marche ?")
             
             col1, col2, col3, col4 = st.columns(4)
             
@@ -301,117 +188,109 @@ if page == "📊 Dashboard":
     
     # ==================== CHARGEMENT DES DONNÉES ====================
     
-    # Message de chargement
-    with st.spinner("⏳ Chargement et analyse du fichier..."):
-        try:
-            df = utils_data.load_dataframe(uploaded_file)
-            
-            if df is None:
-                st.error("❌ Impossible de lire le fichier. Vérifiez le format et l'encodage.")
-                st.stop()
-            
-            # Stockage en session state
-            st.session_state.df = df
+    # Chargement + profiling : uniquement quand le fichier change
+    if uploaded_file is not None:
+        file_key = (uploaded_file.name, uploaded_file.size)
+        if file_key != st.session_state.file_key:
+            with st.spinner("⏳ Chargement et analyse du fichier..."):
+                try:
+                    new_df = utils_data.load_dataframe(uploaded_file)
+                    new_profil = utils_data.profile_data_quality(new_df)
+                except Exception as e:
+                    st.error(f"❌ Impossible de lire le fichier : {e}")
+                    st.stop()
+            st.session_state.df = new_df
+            st.session_state.profil = new_profil
+            st.session_state.file_key = file_key
+            st.session_state.file_name = uploaded_file.name
             st.session_state.file_uploaded = True
-            
-            # Profiling
-            profil = utils_data.profile_data_quality(df)
-            st.session_state.profil = profil
-            
-            st.success(f"✅ Fichier chargé avec succès: **{uploaded_file.name}** ({profil['rows']:,} lignes × {profil['cols']} colonnes)")
-            
-        except Exception as e:
-            st.error(f"❌ Erreur lors du chargement: {str(e)}")
-            st.stop()
-    
+            st.session_state.synthesis = None
+            st.session_state.tests = None
+            st.session_state.cleaning_script = None
+            st.rerun()  # redessine l'en-tête en mode compact
+
+    profil = st.session_state.profil
+    st.caption(
+        f"📄 **{st.session_state.file_name}** — "
+        f"{profil['rows']:,} lignes × {profil['cols']} colonnes"
+    )
+
     df = st.session_state.df
     profil = st.session_state.profil
     
     st.markdown("---")
     
-    # ==================== KPIs PRINCIPAUX ====================
-    
-    st.markdown("### 📈 Indicateurs Clés de Performance")
-    
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    
-    with col1:
-        st.metric("📊 Lignes", f"{profil['rows']:,}")
-    
-    with col2:
-        st.metric("📋 Colonnes", profil['cols'])
-    
-    with col3:
-        score = profil['global_score']
-        delta_color = "normal" if score >= 70 else "inverse"
-        st.metric(
-            "🎯 Score Global", 
-            f"{score}%",
-            delta=None,
-            delta_color=delta_color
-        )
-    
-    with col4:
-        st.metric(
-            "❌ Valeurs Manquantes",
-            f"{profil['total_missing']:,}",
-            delta=f"{profil['missing_rate']:.1f}%",
-            delta_color="inverse"
-        )
-    
-    with col5:
-        st.metric(
-            "🔄 Doublons",
-            profil['duplicate_rows'],
-            delta=f"{profil['duplicate_rate']:.1f}%",
-            delta_color="inverse"
-        )
-    
-    with col6:
-        st.metric(
-            "⚡ Outliers",
-            profil.get('total_outliers', 0)
-        )
-    
-    # Barre de progression du score
-    score_color = "#4CAF50" if score >= 80 else "#FFC107" if score >= 60 else "#FF9800" if score >= 40 else "#F44336"
-    
-    st.markdown(f"""
-    <div style='margin-top: 20px;'>
-        <div style='background: #e0e0e0; border-radius: 10px; height: 30px; overflow: hidden;'>
-            <div style='background: {score_color}; width: {score}%; height: 100%; display: flex; align-items: center; justify-content: center; color: white; font-weight: bold; transition: width 0.5s ease;'>
-                Score de Qualité: {score}%
-            </div>
-        </div>
-    </div>
-    """, unsafe_allow_html=True)
-    
+    # ==================== VERDICT ====================
+
+    score = profil['global_score']
+    with st.container(border=True):
+        col_score, col_issues = st.columns([1, 2], gap="large")
+
+        with col_score:
+            st.caption("SCORE DE QUALITÉ")
+            st.markdown(f"## {score:.0f} / 100")
+            st.markdown(f"**{utils_data.score_label(score)}**")
+            score_bar(score)
+            with st.expander("Comment est calculé le score ?"):
+                details = profil["score_details"]
+                st.table(pd.DataFrame({
+                    "Composante": ["Valeurs manquantes", "Doublons", "Outliers", "Colonnes vides/constantes"],
+                    "Poids": ["40 %", "25 %", "20 %", "15 %"],
+                    "Note /100": [details["missing_score"], details["duplicate_score"],
+                                  details["outlier_score"], details["problematic_columns_score"]],
+                }).set_index("Composante"))
+
+        with col_issues:
+            st.caption("PRINCIPAUX PROBLÈMES")
+            issues = utils_data.top_issues(profil)
+            if not issues:
+                st.success("Aucun problème majeur détecté.")
+            icons = {3: "🔴", 2: "🟠", 1: "🟡"}
+            for issue in issues:
+                st.markdown(f"{icons[issue['severity']]} **{issue['title']}**  \n"
+                            f"<span style='opacity:.7'>{html.escape(issue['detail'])}</span>",
+                            unsafe_allow_html=True)
+
+    col1, col2, col3, col4, col5 = st.columns(5)
+    col1.metric("Lignes", f"{profil['rows']:,}")
+    col2.metric("Colonnes", profil['cols'])
+    col3.metric("Valeurs manquantes", f"{profil['total_missing']:,}",
+                delta=f"{profil['missing_rate']:.1f} %", delta_color="inverse")
+    col4.metric("Doublons", f"{profil['duplicate_rows']:,}",
+                delta=f"{profil['duplicate_rate']:.1f} %", delta_color="inverse")
+    col5.metric("Outliers", f"{profil.get('total_outliers', 0):,}")
+
     st.markdown("---")
-    
+
     # ==================== ONGLETS D'ANALYSE ====================
     
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
-        "📊 Aperçu", 
-        "📈 Visualisations", 
-        "🔍 Profiling Détaillé",
-        "🤖 Synthèse IA",
-        "🧪 Tests Suggérés",
-        "📄 Export"
+    tab1, tab2, tab3, tab_rows, tab4, tab5, tab6 = st.tabs([
+        "Aperçu", 
+        "Visualisations", 
+        "Profiling détaillé",
+        "Lignes à corriger",
+        "Synthèse IA",
+        "Tests suggérés",
+        "Export"
     ])
     
     # ====== TAB 1: APERÇU ======
     with tab1:
-        st.markdown("### 📋 Aperçu du Dataset")
+        st.markdown("### Aperçu du Dataset")
         
         # Options d'affichage
         col_opt1, col_opt2 = st.columns([1, 3])
         with col_opt1:
-            n_rows = st.slider("Nombre de lignes", 10, min(500, len(df)), 50)
+            max_rows = min(500, len(df))
+            if max_rows > 10:
+                n_rows = st.slider("Nombre de lignes", 10, max_rows, min(50, max_rows))
+            else:
+                n_rows = max_rows
         
-        st.dataframe(df.head(n_rows), use_container_width=True, height=400)
+        st.dataframe(df.head(n_rows), width="stretch", height=400)
         
         # Informations rapides
-        st.markdown("### 📊 Informations Rapides")
+        st.markdown("### Informations Rapides")
         
         col_info1, col_info2 = st.columns(2)
         
@@ -431,64 +310,93 @@ if page == "📊 Dashboard":
                 st.write(f"- 🔄 {profil['duplicate_rows']} ligne(s) dupliquée(s)")
             if not (profil['empty_columns'] or profil['constant_columns'] or profil['duplicate_rows'] > 0):
                 st.success("✅ Aucun problème majeur détecté!")
+
+        quick_wins = utils_data.generate_quick_wins(profil)
+        if quick_wins:
+            st.markdown("### Quick Wins")
+            for qw in quick_wins:
+                with st.expander(f"[{qw['priority']}] {qw['action']}"):
+                    st.write(f"**Impact :** {qw['impact']}")
+                    st.write(f"**Colonnes :** {qw['columns']}")
+                    st.code(qw['code'], language="python")
     
     # ====== TAB 2: VISUALISATIONS ======
     with tab2:
-        st.markdown("### 📊 Visualisations Avancées")
+        st.markdown("### Visualisations Avancées")
         
         # Graphiques côte à côte
         col_viz1, col_viz2 = st.columns(2)
         
         with col_viz1:
-            st.markdown("#### 🔴 Valeurs Manquantes")
-            fig_missing = create_missing_chart(profil)
+            st.markdown("#### Valeurs Manquantes")
+            fig_missing = charts.create_missing_chart(profil)
             if fig_missing:
-                st.pyplot(fig_missing)
+                show_fig(fig_missing)
             else:
                 st.success("✅ Aucune valeur manquante significative!")
         
         with col_viz2:
-            st.markdown("#### 🎨 Distribution des Types")
-            fig_types = create_types_chart(profil['column_types'])
-            st.pyplot(fig_types)
+            st.markdown("#### Distribution des Types")
+            fig_types = charts.create_types_chart(profil['column_types'])
+            show_fig(fig_types)
         
         # Heatmap des outliers
-        st.markdown("#### ⚡ Heatmap des Outliers (IQR)")
-        fig_outliers = create_outliers_heatmap(profil)
+        st.markdown("#### Outliers par colonne (IQR)")
+        fig_outliers = charts.create_outliers_chart(profil)
         
         if fig_outliers:
-            st.pyplot(fig_outliers)
+            show_fig(fig_outliers)
         else:
             st.info("ℹ️ Aucun outlier détecté ou pas de colonnes numériques.")
         
         # Matrice de corrélation
         if not profil['correlations'].empty:
-            st.markdown("#### 🔗 Matrice de Corrélation")
+            st.markdown("#### Matrice de Corrélation")
             
-            fig_corr, ax_corr = plt.subplots(figsize=(12, 10))
-            sns.heatmap(
-                profil['correlations'],
-                annot=True,
-                fmt=".2f",
-                cmap="coolwarm",
-                center=0,
-                ax=ax_corr,
-                linewidths=0.5
-            )
-            ax_corr.set_title("Corrélations entre variables numériques", fontsize=14, fontweight='bold', pad=15)
-            st.pyplot(fig_corr)
+            show_fig(charts.create_correlation_chart(profil['correlations']))
     
     # ====== TAB 3: PROFILING DÉTAILLÉ ======
     with tab3:
-        st.markdown("### 🔍 Profiling Détaillé par Colonne")
+        st.markdown("### Profiling Détaillé par Colonne")
         
-        col_select = st.selectbox(
-            "📋 Sélectionnez une colonne à analyser",
-            list(df.columns),
-            help="Choisissez une colonne pour voir ses statistiques détaillées"
+        summary = utils_data.build_column_summary(df, profil)
+
+        f1, f2, f3 = st.columns([2, 2, 1])
+        search = f1.text_input("Rechercher une colonne", placeholder="nom de colonne…")
+        types_sel = f2.multiselect("Type", sorted(summary["Type"].unique()))
+        only_issues = f3.toggle("Problèmes seuls", value=False)
+
+        view = summary
+        if search:
+            view = view[view["Colonne"].str.contains(search, case=False, regex=False)]
+        if types_sel:
+            view = view[view["Type"].isin(types_sel)]
+        if only_issues:
+            view = view[view["Statut"] != "🟢 OK"]
+        view = view.sort_values("Statut", key=lambda c: c.map(
+            {"🔴 Critique": 0, "🟠 À surveiller": 1, "🟡 Mineur": 2, "🟢 OK": 3})).reset_index(drop=True)
+
+        st.caption(f"{len(view)} colonne(s) sur {len(summary)} — cliquez sur une ligne pour le détail.")
+        event = st.dataframe(
+            view, hide_index=True, width="stretch", height=min(400, 38 + 35 * max(len(view), 1)),
+            on_select="rerun", selection_mode="single-row",
+            column_config={
+                "% manquant": st.column_config.ProgressColumn(
+                    "% manquant", min_value=0, max_value=100, format="%.1f %%"),
+            },
         )
-        
-        if col_select:
+
+        selected_rows = event.selection.rows if event and event.selection else []
+        if selected_rows and selected_rows[0] < len(view):
+            col_select = view.loc[selected_rows[0], "Colonne"]
+        elif len(view):
+            col_select = view.loc[0, "Colonne"]
+        else:
+            col_select = None
+            st.info("Aucune colonne ne correspond aux filtres.")
+
+        if col_select is not None:
+            col_select = next(c for c in df.columns if str(c) == col_select)
             st.markdown(f"#### Analyse de : **{col_select}**")
             
             # Informations de base
@@ -510,50 +418,77 @@ if page == "📊 Dashboard":
             st.markdown("---")
             
             # Visualisations selon le type
-            if pd.api.types.is_numeric_dtype(df[col_select]):
+            if df[col_select].dropna().empty:
+                st.info("Cette colonne est entièrement vide : aucun graphique à afficher.")
+            elif pd.api.types.is_numeric_dtype(df[col_select]):
                 col_num1, col_num2 = st.columns(2)
                 
+                fig_dist, fig_box = charts.create_numeric_charts(df[col_select], col_select)
                 with col_num1:
                     st.markdown("**📊 Distribution**")
-                    fig_dist, ax_dist = plt.subplots(figsize=(8, 5))
-                    df[col_select].dropna().hist(bins=30, ax=ax_dist, color="#667eea", edgecolor="white")
-                    ax_dist.set_xlabel(col_select)
-                    ax_dist.set_ylabel("Fréquence")
-                    ax_dist.set_title(f"Distribution de {col_select}")
-                    ax_dist.grid(alpha=0.3)
-                    st.pyplot(fig_dist)
+                    show_fig(fig_dist)
                 
                 with col_num2:
                     st.markdown("**📦 Boxplot**")
-                    fig_box, ax_box = plt.subplots(figsize=(8, 5))
-                    df[col_select].dropna().plot.box(ax=ax_box, color=dict(boxes='#667eea', whiskers='#764ba2', medians='#F44336'))
-                    ax_box.set_ylabel(col_select)
-                    ax_box.set_title(f"Boxplot de {col_select}")
-                    ax_box.grid(axis='y', alpha=0.3)
-                    st.pyplot(fig_box)
+                    show_fig(fig_box)
                 
                 # Statistiques descriptives
                 st.markdown("**📈 Statistiques Descriptives**")
-                st.dataframe(df[col_select].describe().to_frame().T, use_container_width=True)
+                st.dataframe(df[col_select].describe().to_frame().T, width="stretch")
                 
             else:
                 # Pour colonnes non-numériques
                 st.markdown("**📊 Distribution des Valeurs**")
-                value_counts = df[col_select].value_counts().head(20)
+                fig_cat, value_counts = charts.create_category_chart(df[col_select], col_select)
+                show_fig(fig_cat)
                 
-                fig_cat, ax_cat = plt.subplots(figsize=(10, 6))
-                value_counts.plot(kind='barh', ax=ax_cat, color='#667eea')
-                ax_cat.set_xlabel("Fréquence")
-                ax_cat.set_title(f"Top 20 valeurs de {col_select}")
-                ax_cat.invert_yaxis()
-                ax_cat.grid(axis='x', alpha=0.3)
-                st.pyplot(fig_cat)
-                
-                st.dataframe(value_counts.to_frame("Fréquence"), use_container_width=True)
+                st.dataframe(value_counts.to_frame("Fréquence"), width="stretch")
     
+    # ====== TAB: LIGNES À CORRIGER ======
+    with tab_rows:
+        st.markdown("### Lignes à corriger")
+        st.caption("Retrouvez et téléchargez les lignes concernées par un problème de qualité.")
+
+        kind_label = st.radio(
+            "Type de problème",
+            ["Doublons", "Valeurs manquantes", "Outliers"],
+            horizontal=True,
+        )
+        kind = {"Doublons": "duplicates", "Valeurs manquantes": "missing", "Outliers": "outliers"}[kind_label]
+
+        column = None
+        if kind == "missing":
+            options = ["(toutes les colonnes)"] + [str(c) for c in df.columns if profil["missing_count"][c] > 0]
+            choice = st.selectbox("Colonne", options)
+            column = None if choice == options[0] else next(c for c in df.columns if str(c) == choice)
+        elif kind == "outliers":
+            outlier_cols = [str(c) for c, n in profil.get("outliers", {}).items() if n > 0]
+            if outlier_cols:
+                choice = st.selectbox("Colonne numérique", outlier_cols)
+                column = next(c for c in df.columns if str(c) == choice)
+
+        if kind == "outliers" and column is None:
+            st.success("✅ Aucun outlier détecté.")
+        else:
+            problem_rows = utils_data.get_problem_rows(df, profil, kind, column)
+            if problem_rows.empty:
+                st.success("✅ Aucune ligne concernée.")
+            else:
+                st.warning(f"{len(problem_rows):,} ligne(s) concernée(s) "
+                           f"({len(problem_rows) / max(1, len(df)) * 100:.1f} % du fichier)")
+                st.caption("L'index est le numéro de ligne dans le fichier d'origine (à partir de 0, hors en-tête).")
+                st.dataframe(problem_rows.head(1000), width="stretch", height=400)
+                if len(problem_rows) > 1000:
+                    st.caption("Aperçu limité à 1 000 lignes ; le téléchargement contient tout.")
+                st.download_button(
+                    "⬇️ Télécharger ces lignes (CSV)",
+                    problem_rows.to_csv().encode("utf-8"),
+                    file_name=f"lignes_{kind}.csv", mime="text/csv",
+                )
+
     # ====== TAB 4: SYNTHÈSE IA ======
     with tab4:
-        st.markdown("### 🤖 Synthèse & Recommandations IA")
+        st.markdown("### Synthèse & Recommandations IA")
         
         if not openai_client:
             st.warning("""
@@ -563,7 +498,7 @@ if page == "📊 Dashboard":
             """)
             
             # Afficher quand même une synthèse basique
-            st.markdown("#### 📊 Résumé Rapide (Sans IA)")
+            st.markdown("#### Résumé Rapide (Sans IA)")
             st.info(f"""
             - **Dataset:** {profil['rows']:,} lignes × {profil['cols']} colonnes
             - **Score global:** {profil['global_score']}%
@@ -571,10 +506,13 @@ if page == "📊 Dashboard":
             """)
             
         else:
-            if st.button("🚀 Générer la Synthèse IA", type="primary", use_container_width=True):
+            if st.button("🚀 Générer la Synthèse IA", type="primary", width="stretch"):
                 with st.spinner("🤖 Génération de la synthèse en cours... (cela peut prendre 10-20 secondes)"):
                     try:
-                        synthesis = utils_openai.generate_synthesis(openai_client, df, profil)
+                        synthesis = utils_openai.generate_synthesis(
+                            openai_client, df, profil,
+                            include_samples=send_samples, model=openai_model
+                        )
                         st.session_state.synthesis = synthesis
                         st.success("✅ Synthèse générée avec succès!")
                     except Exception as e:
@@ -589,18 +527,38 @@ if page == "📊 Dashboard":
                 if st.button("🔄 Régénérer", help="Générer une nouvelle synthèse"):
                     st.session_state.synthesis = None
                     st.rerun()
+
+            st.markdown("---")
+            st.markdown("#### Script de nettoyage")
+            st.caption("Généré à partir des problèmes détectés (noms de colonnes, sans valeurs).")
+            if st.button("🧹 Générer un script de nettoyage", width="stretch"):
+                with st.spinner("🤖 Génération du script..."):
+                    try:
+                        st.session_state.cleaning_script = utils_openai.generate_cleaning_script(
+                            openai_client, df, profil, model=openai_model
+                        )
+                    except Exception as e:
+                        st.error(f"❌ Erreur lors de la génération: {str(e)}")
+            if st.session_state.get("cleaning_script"):
+                script = st.session_state.cleaning_script
+                st.code(script, language="python")
+                st.download_button("⬇️ Télécharger le script", script.encode("utf-8"),
+                                   file_name="nettoyage.py", mime="text/x-python")
     
     # ====== TAB 5: TESTS SUGGÉRÉS ======
     with tab5:
-        st.markdown("### 🧪 Tests de Qualité Suggérés")
+        st.markdown("### Tests de Qualité Suggérés")
         
         if not openai_client:
             st.warning("⚠️ Fonctionnalité IA désactivée. Configurez OpenAI pour générer des tests.")
         else:
-            if st.button("🧪 Générer les Tests IA", type="primary", use_container_width=True):
+            if st.button("🧪 Générer les Tests IA", type="primary", width="stretch"):
                 with st.spinner("🤖 Génération des tests en cours..."):
                     try:
-                        tests = utils_openai.generate_tests(openai_client, df)
+                        tests = utils_openai.generate_tests(
+                            openai_client, df,
+                            include_samples=send_samples, model=openai_model
+                        )
                         st.session_state.tests = tests
                         st.success("✅ Tests générés avec succès!")
                     except Exception as e:
@@ -612,62 +570,95 @@ if page == "📊 Dashboard":
     
     # ====== TAB 6: EXPORT ======
     with tab6:
-        st.markdown("### 📄 Export du Rapport")
+        st.markdown("### Export du Rapport")
         
         st.info("""
         💡 **Options d'export disponibles:**
-        - Rapport HTML complet (recommandé)
-        - Rapport PDF (si pdfkit est installé)
-        - Données nettoyées (CSV)
+        - Rapport PDF
+        - Rapport HTML complet
+        - Données nettoyées avec aperçu avant/après
         """)
         
-        # Générer le rapport
-        if utils_pdf:
-            synthesis_text = st.session_state.synthesis if st.session_state.synthesis else "Synthèse non générée. Utilisez l'onglet 'Synthèse IA' pour générer une analyse complète."
-            
-            col_export1, col_export2 = st.columns(2)
-            
-            with col_export1:
-                if st.button("📄 Générer le Rapport HTML/PDF", type="primary", use_container_width=True):
-                    with st.spinner("📝 Génération du rapport..."):
-                        try:
-                            html_content = utils_pdf.generate_pdf_html(synthesis_text, profil, df)
-                            export_link = utils_pdf.export_pdf(html_content)
-                            
-                            st.markdown("---")
-                            st.markdown("#### ✅ Rapport généré avec succès!")
-                            st.markdown(export_link, unsafe_allow_html=True)
-                            
-                        except Exception as e:
-                            st.error(f"❌ Erreur lors de la génération: {str(e)}")
-            
-            with col_export2:
-                # Export des données nettoyées
-                if st.button("💾 Exporter les Données (CSV)", use_container_width=True):
-                    csv = df.to_csv(index=False).encode('utf-8')
-                    st.download_button(
-                        label="⬇️ Télécharger CSV",
-                        data=csv,
-                        file_name=f"data_cleaned_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv",
-                        use_container_width=True
-                    )
+        synthesis_text = st.session_state.synthesis or (
+            "Synthèse non générée. Utilisez l'onglet 'Synthèse IA' pour générer une analyse complète."
+        )
+        stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+        col_export1, col_export2 = st.columns(2)
+
+        with col_export1:
+            try:
+                st.download_button(
+                    "📄 Rapport PDF",
+                    data=utils_pdf.generate_pdf_bytes(synthesis_text, profil),
+                    file_name=f"rapport_data_quality_{stamp}.pdf",
+                    mime="application/pdf",
+                    type="primary",
+                    width="stretch",
+                )
+            except Exception as e:
+                st.error(f"❌ Erreur PDF : {e}")
+
+        with col_export2:
+            st.download_button(
+                "🌐 Rapport HTML",
+                data=utils_pdf.generate_pdf_html(synthesis_text, profil, df).encode("utf-8"),
+                file_name=f"rapport_data_quality_{stamp}.html",
+                mime="text/html",
+                width="stretch",
+            )
+
+        st.markdown("---")
+        st.markdown("#### Nettoyage des données")
+        opt1, opt2 = st.columns(2)
+        with opt1:
+            o_empty = st.checkbox("Supprimer les colonnes vides", value=True)
+            o_const = st.checkbox("Supprimer les colonnes constantes", value=True)
+            o_dups = st.checkbox("Supprimer les lignes dupliquées", value=True)
+        with opt2:
+            o_strip = st.checkbox("Retirer les espaces en début/fin de texte", value=False)
+            o_missing = st.checkbox("Supprimer les colonnes très incomplètes", value=False)
+            max_missing = st.slider("Seuil de valeurs manquantes (%)", 10, 99, 50,
+                                    disabled=not o_missing)
+
+        cleaned = utils_data.clean_dataframe(
+            df, drop_empty=o_empty, drop_constant=o_const, drop_duplicates=o_dups,
+            max_missing_pct=max_missing if o_missing else None, strip_text=o_strip,
+        )
+        before_profil = profil
+        after_profil = utils_data.profile_data_quality(cleaned) if len(cleaned.columns) else None
+
+        st.markdown("**Avant → après**")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Lignes", f"{len(cleaned):,}", delta=f"{len(cleaned) - len(df):,}", delta_color="off")
+        m2.metric("Colonnes", cleaned.shape[1], delta=cleaned.shape[1] - df.shape[1], delta_color="off")
+        if after_profil:
+            m3.metric("Score", f"{after_profil['global_score']:.0f} / 100",
+                      delta=f"{after_profil['global_score'] - before_profil['global_score']:+.1f}")
+            m4.metric("Valeurs manquantes", f"{after_profil['total_missing']:,}",
+                      delta=f"{after_profil['total_missing'] - before_profil['total_missing']:,}",
+                      delta_color="inverse")
         else:
-            st.warning("⚠️ Module utils_pdf non disponible. Export limité.")
+            st.warning("Toutes les colonnes seraient supprimées : assouplissez les options.")
+
+        st.download_button(
+            "💾 Télécharger les données nettoyées (CSV)",
+            data=cleaned.to_csv(index=False).encode("utf-8"),
+            file_name=f"data_cleaned_{stamp}.csv",
+            mime="text/csv",
+            type="primary",
+            disabled=cleaned.empty and cleaned.shape[1] == 0,
+        )
 
 
 # ==================== PAGE: CONTACT ====================
 
-elif page == "📞 Contact":
+elif page == "Contact":
     
-    st.title("📞 Contact")
+    st.title("Contact")
     
     st.markdown("""
-    <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                padding: 40px; 
-                border-radius: 16px; 
-                color: white; 
-                margin-bottom: 30px;'>
+    <div class='hero'>
         <h2 style='margin-bottom: 20px;'>👋 Parlons de vos données!</h2>
         <p style='font-size: 1.1rem; opacity: 0.95;'>
         Besoin d'aide avec votre projet data? D'une consultation sur la qualité de vos données?
@@ -694,7 +685,7 @@ elif page == "📞 Contact":
         """)
     
     with col_contact2:
-        st.markdown("### 💡 Domaines d'Expertise")
+        st.markdown("### Domaines d'Expertise")
         st.markdown("""
         - 🔍 Data Quality & Governance
         - 📊 Data Engineering
@@ -705,31 +696,19 @@ elif page == "📞 Contact":
     
     st.markdown("---")
     
-    # Formulaire de contact (optionnel)
-    st.markdown("### ✉️ Envoyez un Message")
-    
-    with st.form("contact_form"):
-        name = st.text_input("Nom", placeholder="Votre nom")
-        email = st.text_input("Email", placeholder="votre.email@example.com")
-        subject = st.text_input("Sujet", placeholder="Sujet de votre message")
-        message = st.text_area("Message", placeholder="Votre message...", height=150)
-        
-        submitted = st.form_submit_button("📤 Envoyer", use_container_width=True)
-        
-        if submitted:
-            if name and email and message:
-                st.success("✅ Message envoyé! Je vous répondrai dans les plus brefs délais.")
-                st.balloons()
-            else:
-                st.error("❌ Veuillez remplir tous les champs.")
+    st.markdown("### Envoyer un message")
+    st.markdown(
+        "Écrivez-moi directement : "
+        "[soumanoseydou@icloud.com](mailto:soumanoseydou@icloud.com?subject=Data%20Quality%20Platform)"
+    )
 
 
 # ==================== FOOTER ====================
 
 st.markdown("---")
 st.markdown("""
-<div style='text-align: center; color: #666; padding: 20px;'>
-    <p><strong>Data Quality Platform - PRO</strong> | Version 2.0</p>
+<div class='app-footer'>
+    <p><strong>Data Quality Platform</strong> · Version 2.1</p>
     <p>Développé avec ❤️ par Seydou SOUMANO | © 2026</p>
 </div>
 """, unsafe_allow_html=True)

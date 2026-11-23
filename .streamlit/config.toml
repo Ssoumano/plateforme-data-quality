@@ -1,0 +1,12 @@
+# Sans "base", Streamlit suit le thème du système (clair/sombre).
+[theme.light]
+primaryColor = "#667eea"
+
+[theme.dark]
+primaryColor = "#8b9bff"
+
+[theme]
+font = "sans serif"
+
+[client]
+toolbarMode = "minimal"

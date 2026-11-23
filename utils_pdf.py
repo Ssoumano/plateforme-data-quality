@@ -1,6 +1,6 @@
 # utils_pdf.py
 
-import base64
+import html as html_lib
 from typing import Dict, Optional
 from datetime import datetime
 import pandas as pd
@@ -112,13 +112,13 @@ def generate_pdf_html(synthesis: str, profil: Dict, df: Optional[pd.DataFrame] =
     problems_html = "<ul class='problems-list'>"
     
     if profil['empty_columns']:
-        problems_html += f"<li><strong>❌ Colonnes vides:</strong> {', '.join(profil['empty_columns'][:5])}"
+        problems_html += f"<li><strong>❌ Colonnes vides:</strong> {html_lib.escape(', '.join(str(c) for c in profil['empty_columns'][:5]))}"
         if len(profil['empty_columns']) > 5:
             problems_html += f" <em>(+{len(profil['empty_columns'])-5} autres)</em>"
         problems_html += "</li>"
     
     if profil['constant_columns']:
-        problems_html += f"<li><strong>⚠️ Colonnes constantes:</strong> {', '.join(profil['constant_columns'][:5])}"
+        problems_html += f"<li><strong>⚠️ Colonnes constantes:</strong> {html_lib.escape(', '.join(str(c) for c in profil['constant_columns'][:5]))}"
         if len(profil['constant_columns']) > 5:
             problems_html += f" <em>(+{len(profil['constant_columns'])-5} autres)</em>"
         problems_html += "</li>"
@@ -128,7 +128,7 @@ def generate_pdf_html(synthesis: str, profil: Dict, df: Optional[pd.DataFrame] =
     
     high_missing = profil['missing_pct'][profil['missing_pct'] > 50]
     if not high_missing.empty:
-        problems_html += f"<li><strong>📊 Colonnes avec >50% de valeurs manquantes:</strong> {', '.join(high_missing.index.tolist()[:5])}"
+        problems_html += f"<li><strong>📊 Colonnes avec >50% de valeurs manquantes:</strong> {html_lib.escape(', '.join(str(c) for c in high_missing.index.tolist()[:5]))}"
         if len(high_missing) > 5:
             problems_html += f" <em>(+{len(high_missing)-5} autres)</em>"
         problems_html += "</li>"
@@ -141,7 +141,7 @@ def generate_pdf_html(synthesis: str, profil: Dict, df: Optional[pd.DataFrame] =
     # Recommandations
     recommendations_html = "<ul class='recommendations-list'>"
     for rec in profil.get('recommendations', []):
-        recommendations_html += f"<li>{rec}</li>"
+        recommendations_html += f"<li>{html_lib.escape(str(rec))}</li>"
     recommendations_html += "</ul>"
     
     # Distribution des types (si disponible)
@@ -398,7 +398,7 @@ def generate_pdf_html(synthesis: str, profil: Dict, df: Optional[pd.DataFrame] =
             <div class="section">
                 <h2>📝 Synthèse Détaillée</h2>
                 <div class="synthesis-box">
-                    {synthesis.replace(chr(10), '<br>')}
+                    {html_lib.escape(synthesis).replace(chr(10), '<br>')}
                 </div>
             </div>
             
@@ -414,71 +414,64 @@ def generate_pdf_html(synthesis: str, profil: Dict, df: Optional[pd.DataFrame] =
     return html
 
 
-def export_pdf(html_content: str) -> str:
-    """
-    Convertit du contenu HTML en lien de téléchargement.
-    
-    Note: Cette fonction retourne un lien HTML encodé en base64.
-    Pour une vraie conversion PDF, il faudrait utiliser pdfkit ou weasyprint.
-    
-    Args:
-        html_content: Contenu HTML à exporter
-        
-    Returns:
-        str: Lien HTML de téléchargement
-    """
-    try:
-        # Tentative d'import de pdfkit pour vraie conversion PDF
-        import pdfkit
-        
-        try:
-            pdf_bytes = pdfkit.from_string(html_content, False)
-            b64 = base64.b64encode(pdf_bytes).decode()
-            href = f'<a href="data:application/pdf;base64,{b64}" download="rapport_data_quality.pdf" class="download-btn">📄 Télécharger le rapport PDF</a>'
-            return href
-        except Exception as e:
-            # Fallback si pdfkit ne fonctionne pas
-            print(f"Erreur pdfkit: {e}")
-            return export_html_fallback(html_content)
-            
-    except ImportError:
-        # Si pdfkit n'est pas installé, utiliser le fallback HTML
-        return export_html_fallback(html_content)
+def generate_pdf_bytes(synthesis: str, profil: Dict) -> bytes:
+    """Génère un vrai PDF (reportlab) du rapport de qualité."""
+    import io
+    import re
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import getSampleStyleSheet
+    from reportlab.lib.units import cm
+    from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+    def clean(text: str) -> str:
+        """Retire emojis/markdown (police Helvetica = latin-1) et échappe le XML."""
+        text = re.sub(r"[*_`#]+", "", str(text))
+        text = text.encode("latin-1", "ignore").decode("latin-1")
+        return html_lib.escape(text)
 
-def export_html_fallback(html_content: str) -> str:
-    """
-    Fallback: Export en HTML pur (peut être sauvegardé comme PDF via le navigateur).
-    
-    Args:
-        html_content: Contenu HTML
-        
-    Returns:
-        str: Lien de téléchargement HTML
-    """
-    b64 = base64.b64encode(html_content.encode('utf-8')).decode()
-    
-    href = f'''
-    <a href="data:text/html;base64,{b64}" 
-       download="rapport_data_quality.html" 
-       style="
-           display: inline-block;
-           padding: 12px 24px;
-           background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-           color: white;
-           text-decoration: none;
-           border-radius: 8px;
-           font-weight: 600;
-           box-shadow: 0 4px 12px rgba(102, 126, 234, 0.3);
-           transition: transform 0.2s ease;
-       "
-       onmouseover="this.style.transform='translateY(-2px)'"
-       onmouseout="this.style.transform='translateY(0)'">
-        📄 Télécharger le rapport HTML
-    </a>
-    <p style="margin-top: 10px; color: #666; font-size: 0.9rem;">
-        💡 Conseil: Vous pouvez ouvrir le fichier HTML et l'enregistrer en PDF via votre navigateur (Imprimer → Enregistrer au format PDF)
-    </p>
-    '''
-    
-    return href
+    styles = getSampleStyleSheet()
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, leftMargin=2 * cm, rightMargin=2 * cm,
+                            topMargin=2 * cm, bottomMargin=2 * cm,
+                            title="Rapport Data Quality")
+    story = [
+        Paragraph("Rapport Data Quality", styles["Title"]),
+        Paragraph(datetime.now().strftime("Genere le %d/%m/%Y a %H:%M"), styles["Normal"]),
+        Spacer(1, 0.5 * cm),
+    ]
+
+    rows = [
+        ["Lignes", f"{profil['rows']:,}"],
+        ["Colonnes", str(profil["cols"])],
+        ["Score global", f"{profil['global_score']}%"],
+        ["Valeurs manquantes", f"{profil['total_missing']:,} ({profil['missing_rate']:.2f}%)"],
+        ["Lignes dupliquees", f"{profil['duplicate_rows']:,} ({profil['duplicate_rate']:.2f}%)"],
+        ["Outliers", str(profil.get("total_outliers", 0))],
+        ["Colonnes vides", str(len(profil["empty_columns"]))],
+        ["Colonnes constantes", str(len(profil["constant_columns"]))],
+    ]
+    table = Table(rows, colWidths=[6 * cm, 8 * cm])
+    table.setStyle(TableStyle([
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.lightgrey),
+        ("BACKGROUND", (0, 0), (0, -1), colors.whitesmoke),
+        ("FONTNAME", (0, 0), (0, -1), "Helvetica-Bold"),
+    ]))
+    story += [table, Spacer(1, 0.5 * cm), Paragraph("Recommandations", styles["Heading2"])]
+    for rec in profil.get("recommendations", []):
+        story.append(Paragraph("- " + clean(rec), styles["Normal"]))
+
+    story += [Spacer(1, 0.5 * cm), Paragraph("Synthese detaillee", styles["Heading2"])]
+    for line in str(synthesis).splitlines():
+        line = line.strip()
+        if not line or re.fullmatch(r"[|\-: ]+", line):
+            continue
+        if line.startswith("|"):  # ligne de tableau markdown
+            line = " / ".join(c.strip() for c in line.strip("|").split("|"))
+        text = clean(line)
+        if text.strip():
+            story.append(Paragraph(text, styles["Normal"]))
+            story.append(Spacer(1, 0.15 * cm))
+
+    doc.build(story)
+    return buf.getvalue()

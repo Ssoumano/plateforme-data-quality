@@ -4,6 +4,16 @@ from openai import OpenAI
 from typing import Dict, Optional
 import pandas as pd
 
+DEFAULT_MODEL = "gpt-4o-mini"
+
+
+def _samples(series: pd.Series, n: int) -> list:
+    """n valeurs non nulles tirées au hasard (reproductible)."""
+    values = series.dropna()
+    if len(values) > n:
+        values = values.sample(n, random_state=0)
+    return values.tolist()
+
 
 def get_openai_client(api_key: Optional[str] = None) -> OpenAI:
     """
@@ -20,7 +30,8 @@ def get_openai_client(api_key: Optional[str] = None) -> OpenAI:
     return OpenAI()  # Utilise la variable d'environnement OPENAI_API_KEY
 
 
-def generate_synthesis(client: OpenAI, df: pd.DataFrame, profil: Dict) -> str:
+def generate_synthesis(client: OpenAI, df: pd.DataFrame, profil: Dict,
+                       include_samples: bool = False, model: str = DEFAULT_MODEL) -> str:
     """
     Génère une synthèse professionnelle de la qualité des données via IA.
     
@@ -35,12 +46,12 @@ def generate_synthesis(client: OpenAI, df: pd.DataFrame, profil: Dict) -> str:
     # Créer un échantillon du schéma avec exemples
     schema_samples = []
     for col in df.columns[:20]:  # Limiter à 20 colonnes pour le prompt
-        sample_values = df[col].dropna().head(3).tolist()
         dtype = profil["dtypes"][col]
         missing_pct = profil["missing_pct"][col]
-        
+        examples = f" | Exemples: {_samples(df[col], 3)}" if include_samples else ""
+
         schema_samples.append(
-            f"- **{col}** ({dtype}): {sample_values} | Valeurs manquantes: {missing_pct}%"
+            f"- **{col}** ({dtype}) | Valeurs manquantes: {missing_pct}%{examples}"
         )
     
     schema_text = "\n".join(schema_samples)
@@ -112,30 +123,27 @@ Utilise le markdown avec des sections claires, des tableaux, et des listes à pu
 Sois concret, actionnable et professionnel.
 """
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system", 
-                    "content": "Tu es un consultant expert en Data Quality avec une expertise approfondie en analyse de données, data engineering et gouvernance des données. Tu fournis des analyses professionnelles, actionnables et orientées business."
-                },
-                {
-                    "role": "user", 
-                    "content": prompt
-                }
-            ],
-            max_tokens=1500,
-            temperature=0.7
-        )
-        
-        return response.choices[0].message.content
-        
-    except Exception as e:
-        return f"❌ **Erreur lors de la génération de la synthèse:**\n\n{str(e)}"
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system", 
+                "content": "Tu es un consultant expert en Data Quality avec une expertise approfondie en analyse de données, data engineering et gouvernance des données. Tu fournis des analyses professionnelles, actionnables et orientées business."
+            },
+            {
+                "role": "user", 
+                "content": prompt
+            }
+        ],
+        max_tokens=1500,
+        temperature=0.7
+    )
+    
+    return response.choices[0].message.content
 
 
-def generate_tests(client: OpenAI, df: pd.DataFrame) -> str:
+def generate_tests(client: OpenAI, df: pd.DataFrame,
+                   include_samples: bool = False, model: str = DEFAULT_MODEL) -> str:
     """
     Génère des tests de qualité de données adaptés au dataset.
     
@@ -152,10 +160,10 @@ def generate_tests(client: OpenAI, df: pd.DataFrame) -> str:
         dtype = str(df[col].dtype)
         nunique = df[col].nunique()
         missing = df[col].isna().sum()
-        sample = df[col].dropna().head(2).tolist()
-        
+        examples = f" | Ex: {_samples(df[col], 2)}" if include_samples else ""
+
         schema_info.append(
-            f"- **{col}** ({dtype}): {nunique} valeurs uniques, {missing} NaN | Ex: {sample}"
+            f"- **{col}** ({dtype}): {nunique} valeurs uniques, {missing} NaN{examples}"
         )
     
     schema_text = "\n".join(schema_info)
@@ -199,30 +207,27 @@ Sois **TRÈS SPÉCIFIQUE** aux colonnes et types de ce dataset.
 Fournis du code Python **EXÉCUTABLE** utilisant pandas.
 """
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Tu es un expert en tests de qualité de données et en validation de datasets. Tu crées des tests concrets, exécutables et adaptés au contexte spécifique de chaque dataset."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            max_tokens=2000,
-            temperature=0.6
-        )
-        
-        return response.choices[0].message.content
-        
-    except Exception as e:
-        return f"❌ **Erreur lors de la génération des tests:**\n\n{str(e)}"
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": "Tu es un expert en tests de qualité de données et en validation de datasets. Tu crées des tests concrets, exécutables et adaptés au contexte spécifique de chaque dataset."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        max_tokens=2000,
+        temperature=0.6
+    )
+    
+    return response.choices[0].message.content
 
 
-def generate_cleaning_script(client: OpenAI, df: pd.DataFrame, profil: Dict) -> str:
+def generate_cleaning_script(client: OpenAI, df: pd.DataFrame, profil: Dict,
+                             model: str = DEFAULT_MODEL) -> str:
     """
     Génère un script Python complet de nettoyage des données.
     
@@ -269,24 +274,23 @@ Le script doit:
 Format: Code Python pur avec commentaires détaillés.
 """
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "Tu es un expert en data cleaning et préparation de données. Tu écris du code Python propre, commenté et exécutable."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            max_tokens=1500,
-            temperature=0.5
-        )
-        
-        return response.choices[0].message.content
-        
-    except Exception as e:
-        return f"# Erreur lors de la génération du script:\n# {str(e)}"
+    response = client.chat.completions.create(
+        model=model,
+        messages=[
+            {
+                "role": "system",
+                "content": "Tu es un expert en data cleaning et préparation de données. Tu écris du code Python propre, commenté et exécutable."
+            },
+            {
+                "role": "user",
+                "content": prompt
+            }
+        ],
+        max_tokens=1500,
+        temperature=0.5
+    )
+    
+    code = response.choices[0].message.content.strip()
+    if code.startswith("```"):  # retire les clôtures markdown
+        code = "\n".join(l for l in code.splitlines() if not l.strip().startswith("```"))
+    return code
