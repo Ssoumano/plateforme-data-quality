@@ -61,3 +61,14 @@ def test_clean_dataframe():
     df = pd.DataFrame({"a": [1, 1, 2], "c": [0, 0, 0]})
     out = utils_data.clean_dataframe(df)
     assert list(out.columns) == ["a"] and len(out) == 2
+
+
+def test_pdf_and_html_reports_escape_and_build():
+    import utils_pdf
+
+    df = pd.DataFrame({"<b>x</b>": [None, None, None], "ok": [1, 2, 3]})
+    profil = utils_data.profile_data_quality(df)
+    html = utils_pdf.generate_pdf_html("<script>alert(1)</script>", profil, df)
+    assert "<script>alert(1)</script>" not in html
+    assert "<b>x</b>" not in html
+    assert utils_pdf.generate_pdf_bytes("## Synthèse ⚠️ **ok**", profil).startswith(b"%PDF")

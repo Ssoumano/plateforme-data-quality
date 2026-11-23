@@ -8,7 +8,6 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
-import seaborn as sns
 from datetime import datetime
 
 # Configuration de la page
@@ -20,28 +19,13 @@ st.set_page_config(
 )
 
 # Import des modules utilitaires
-try:
-    import styles
-    st.markdown(styles.POWERBI_CSS, unsafe_allow_html=True)
-except ImportError:
-    st.warning("⚠️ Module styles.py non trouvé. Styles par défaut utilisés.")
+import charts
+import styles
+import utils_data
+import utils_openai
+import utils_pdf
 
-try:
-    import utils_data
-except ImportError:
-    st.error("❌ Module utils_data.py requis mais non trouvé!")
-    st.stop()
-
-try:
-    import utils_openai
-except ImportError:
-    utils_openai = None
-    st.sidebar.warning("⚠️ Module utils_openai.py non trouvé. Fonctions IA désactivées.")
-
-try:
-    import utils_pdf
-except ImportError:
-    utils_pdf = None
+st.markdown(styles.POWERBI_CSS, unsafe_allow_html=True)
 
 
 # ==================== INITIALISATION SESSION STATE ====================
@@ -63,17 +47,18 @@ if 'file_name' not in st.session_state:
 
 # ==================== CONFIGURATION OPENAI ====================
 openai_client = None
-if utils_openai is not None:
-    try:
-        if "OPENAI_API_KEY" in st.secrets:
-            openai_client = utils_openai.get_openai_client(st.secrets["OPENAI_API_KEY"])
-        else:
-            try:
-                openai_client = utils_openai.get_openai_client()
-            except Exception:
-                pass
-    except Exception as e:
-        st.sidebar.error(f"Erreur OpenAI: {e}")
+try:
+    if "OPENAI_API_KEY" in st.secrets:
+        openai_client = utils_openai.get_openai_client(st.secrets["OPENAI_API_KEY"])
+    else:
+        openai_client = utils_openai.get_openai_client()
+except Exception:
+    openai_client = None  # clé absente ou invalide : IA désactivée
+
+try:
+    openai_model = st.secrets.get("OPENAI_MODEL", utils_openai.DEFAULT_MODEL)
+except Exception:
+    openai_model = utils_openai.DEFAULT_MODEL
 
 
 # ==================== SIDEBAR NAVIGATION ====================
@@ -91,7 +76,16 @@ st.sidebar.markdown("---")
 # Informations sur le statut
 if openai_client:
     st.sidebar.success("✅ IA activée")
+    send_samples = st.sidebar.checkbox(
+        "Envoyer des exemples de valeurs à OpenAI",
+        value=False,
+        help="Désactivé : seules des statistiques agrégées (noms de colonnes, types, taux de "
+             "manquants) sont transmises. Activé : 2-3 valeurs par colonne sont aussi envoyées "
+             "à OpenAI. À éviter pour des données personnelles ou confidentielles.",
+    )
+    st.sidebar.caption("🔒 Les données du fichier ne quittent l'application que lors d'un appel IA.")
 else:
+    send_samples = False
     st.sidebar.warning("⚠️ IA désactivée")
 
 st.sidebar.markdown("---")
@@ -112,117 +106,6 @@ def show_fig(fig):
     st.pyplot(fig)
     plt.close(fig)
 
-
-def create_missing_chart(profil, top_n=10):
-    """Crée un graphique des colonnes avec le plus de valeurs manquantes."""
-    mp = profil["missing_pct"]
-    if isinstance(mp, dict):
-        mp = pd.Series(mp)
-    
-    mp = mp[mp > 0].sort_values(ascending=False).head(top_n)
-    
-    if mp.empty or mp.sum() == 0:
-        return None
-    
-    fig, ax = plt.subplots(figsize=(10, max(5, len(mp) * 0.4)))
-    
-    # Couleurs basées sur le niveau de sévérité
-    colors_list = [
-        '#F44336' if x > 50 else 
-        '#FF9800' if x > 30 else 
-        '#FFC107' if x > 10 else 
-        '#4CAF50' 
-        for x in mp.values
-    ]
-    
-    mp.plot(kind='barh', ax=ax, color=colors_list, edgecolor='white', linewidth=1.5)
-    ax.set_xlabel("Pourcentage de valeurs manquantes (%)", fontsize=11, fontweight='bold')
-    ax.set_title(f"Top {len(mp)} colonnes avec valeurs manquantes", fontsize=13, fontweight='bold', pad=15)
-    ax.invert_yaxis()
-    ax.grid(axis='x', alpha=0.3, linestyle='--')
-    
-    # Ajouter les valeurs sur les barres
-    for i, v in enumerate(mp.values):
-        ax.text(v + 1, i, f"{v:.1f}%", va='center', fontweight='bold', fontsize=10)
-    
-    plt.tight_layout()
-    return fig
-
-
-def create_types_chart(col_types):
-    """Crée un pie chart de la distribution des types de colonnes."""
-    s = pd.Series(col_types).value_counts()
-    
-    fig, ax = plt.subplots(figsize=(8, 6))
-    
-    colors = ['#2196F3', '#4CAF50', '#FFC107', '#F44336', '#9C27B0', '#00BCD4']
-    explode = [0.05] * len(s)
-    
-    wedges, texts, autotexts = ax.pie(
-        s,
-        autopct="%1.1f%%",
-        startangle=90,
-        colors=colors[:len(s)],
-        explode=explode,
-        shadow=True,
-        textprops={'fontsize': 11, 'fontweight': 'bold'}
-    )
-    
-    ax.legend(wedges, s.index, title="Types", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1))
-    ax.set_title("Distribution des types de colonnes", fontsize=14, fontweight='bold', pad=20)
-    
-    plt.tight_layout()
-    return fig
-
-
-def create_outliers_heatmap(profil):
-    """Crée une heatmap des outliers par colonne."""
-    outliers = profil.get("outliers", {})
-    
-    if not outliers or all(v == 0 for v in outliers.values()):
-        return None
-    
-    # Filtrer les colonnes avec outliers
-    outliers_filtered = {k: v for k, v in outliers.items() if v > 0}
-    
-    if not outliers_filtered:
-        return None
-    
-    outlier_df = pd.DataFrame(
-        list(outliers_filtered.items()), 
-        columns=["Colonne", "Nb Outliers"]
-    ).set_index("Colonne")
-    
-    fig, ax = plt.subplots(figsize=(10, max(3, len(outlier_df) * 0.5)))
-    
-    sns.heatmap(
-        outlier_df,
-        annot=True,
-        fmt="d",
-        cmap="Reds",
-        ax=ax,
-        cbar_kws={"label": "Nombre d'outliers"},
-        linewidths=1,
-        linecolor='white'
-    )
-    
-    ax.set_title("Détection d'outliers (méthode IQR)", fontsize=13, fontweight='bold', pad=15)
-    plt.tight_layout()
-    
-    return fig
-
-
-def display_kpi_metric(label, value, subtitle=None, color_class="info"):
-    """Affiche une métrique KPI stylisée."""
-    subtitle_html = f'<div class="kpi-subtitle">{subtitle}</div>' if subtitle else ''
-    
-    st.markdown(f"""
-    <div class="kpi-tile {color_class}">
-        <div class="kpi-label">{label}</div>
-        <div class="kpi-value">{value}</div>
-        {subtitle_html}
-    </div>
-    """, unsafe_allow_html=True)
 
 
 # ==================== PAGE: DASHBOARD ====================
@@ -329,6 +212,7 @@ if page == "📊 Dashboard":
             st.session_state.file_uploaded = True
             st.session_state.synthesis = None
             st.session_state.tests = None
+            st.session_state.cleaning_script = None
 
     profil = st.session_state.profil
     st.success(
@@ -424,7 +308,7 @@ if page == "📊 Dashboard":
             else:
                 n_rows = max_rows
         
-        st.dataframe(df.head(n_rows), use_container_width=True, height=400)
+        st.dataframe(df.head(n_rows), width="stretch", height=400)
         
         # Informations rapides
         st.markdown("### 📊 Informations Rapides")
@@ -447,6 +331,15 @@ if page == "📊 Dashboard":
                 st.write(f"- 🔄 {profil['duplicate_rows']} ligne(s) dupliquée(s)")
             if not (profil['empty_columns'] or profil['constant_columns'] or profil['duplicate_rows'] > 0):
                 st.success("✅ Aucun problème majeur détecté!")
+
+        quick_wins = utils_data.generate_quick_wins(profil)
+        if quick_wins:
+            st.markdown("### ⚡ Quick Wins")
+            for qw in quick_wins:
+                with st.expander(f"[{qw['priority']}] {qw['action']}"):
+                    st.write(f"**Impact :** {qw['impact']}")
+                    st.write(f"**Colonnes :** {qw['columns']}")
+                    st.code(qw['code'], language="python")
     
     # ====== TAB 2: VISUALISATIONS ======
     with tab2:
@@ -457,7 +350,7 @@ if page == "📊 Dashboard":
         
         with col_viz1:
             st.markdown("#### 🔴 Valeurs Manquantes")
-            fig_missing = create_missing_chart(profil)
+            fig_missing = charts.create_missing_chart(profil)
             if fig_missing:
                 show_fig(fig_missing)
             else:
@@ -465,12 +358,12 @@ if page == "📊 Dashboard":
         
         with col_viz2:
             st.markdown("#### 🎨 Distribution des Types")
-            fig_types = create_types_chart(profil['column_types'])
+            fig_types = charts.create_types_chart(profil['column_types'])
             show_fig(fig_types)
         
         # Heatmap des outliers
         st.markdown("#### ⚡ Heatmap des Outliers (IQR)")
-        fig_outliers = create_outliers_heatmap(profil)
+        fig_outliers = charts.create_outliers_heatmap(profil)
         
         if fig_outliers:
             show_fig(fig_outliers)
@@ -481,18 +374,7 @@ if page == "📊 Dashboard":
         if not profil['correlations'].empty:
             st.markdown("#### 🔗 Matrice de Corrélation")
             
-            fig_corr, ax_corr = plt.subplots(figsize=(12, 10))
-            sns.heatmap(
-                profil['correlations'],
-                annot=True,
-                fmt=".2f",
-                cmap="coolwarm",
-                center=0,
-                ax=ax_corr,
-                linewidths=0.5
-            )
-            ax_corr.set_title("Corrélations entre variables numériques", fontsize=14, fontweight='bold', pad=15)
-            show_fig(fig_corr)
+            show_fig(charts.create_correlation_chart(profil['correlations']))
     
     # ====== TAB 3: PROFILING DÉTAILLÉ ======
     with tab3:
@@ -529,43 +411,26 @@ if page == "📊 Dashboard":
             if pd.api.types.is_numeric_dtype(df[col_select]):
                 col_num1, col_num2 = st.columns(2)
                 
+                fig_dist, fig_box = charts.create_numeric_charts(df[col_select], col_select)
                 with col_num1:
                     st.markdown("**📊 Distribution**")
-                    fig_dist, ax_dist = plt.subplots(figsize=(8, 5))
-                    df[col_select].dropna().hist(bins=30, ax=ax_dist, color="#667eea", edgecolor="white")
-                    ax_dist.set_xlabel(col_select)
-                    ax_dist.set_ylabel("Fréquence")
-                    ax_dist.set_title(f"Distribution de {col_select}")
-                    ax_dist.grid(alpha=0.3)
                     show_fig(fig_dist)
                 
                 with col_num2:
                     st.markdown("**📦 Boxplot**")
-                    fig_box, ax_box = plt.subplots(figsize=(8, 5))
-                    df[col_select].dropna().plot.box(ax=ax_box, color=dict(boxes='#667eea', whiskers='#764ba2', medians='#F44336'))
-                    ax_box.set_ylabel(col_select)
-                    ax_box.set_title(f"Boxplot de {col_select}")
-                    ax_box.grid(axis='y', alpha=0.3)
                     show_fig(fig_box)
                 
                 # Statistiques descriptives
                 st.markdown("**📈 Statistiques Descriptives**")
-                st.dataframe(df[col_select].describe().to_frame().T, use_container_width=True)
+                st.dataframe(df[col_select].describe().to_frame().T, width="stretch")
                 
             else:
                 # Pour colonnes non-numériques
                 st.markdown("**📊 Distribution des Valeurs**")
-                value_counts = df[col_select].value_counts().head(20)
-                
-                fig_cat, ax_cat = plt.subplots(figsize=(10, 6))
-                value_counts.plot(kind='barh', ax=ax_cat, color='#667eea')
-                ax_cat.set_xlabel("Fréquence")
-                ax_cat.set_title(f"Top 20 valeurs de {col_select}")
-                ax_cat.invert_yaxis()
-                ax_cat.grid(axis='x', alpha=0.3)
+                fig_cat, value_counts = charts.create_category_chart(df[col_select], col_select)
                 show_fig(fig_cat)
                 
-                st.dataframe(value_counts.to_frame("Fréquence"), use_container_width=True)
+                st.dataframe(value_counts.to_frame("Fréquence"), width="stretch")
     
     # ====== TAB 4: SYNTHÈSE IA ======
     with tab4:
@@ -587,10 +452,13 @@ if page == "📊 Dashboard":
             """)
             
         else:
-            if st.button("🚀 Générer la Synthèse IA", type="primary", use_container_width=True):
+            if st.button("🚀 Générer la Synthèse IA", type="primary", width="stretch"):
                 with st.spinner("🤖 Génération de la synthèse en cours... (cela peut prendre 10-20 secondes)"):
                     try:
-                        synthesis = utils_openai.generate_synthesis(openai_client, df, profil)
+                        synthesis = utils_openai.generate_synthesis(
+                            openai_client, df, profil,
+                            include_samples=send_samples, model=openai_model
+                        )
                         st.session_state.synthesis = synthesis
                         st.success("✅ Synthèse générée avec succès!")
                     except Exception as e:
@@ -605,6 +473,23 @@ if page == "📊 Dashboard":
                 if st.button("🔄 Régénérer", help="Générer une nouvelle synthèse"):
                     st.session_state.synthesis = None
                     st.rerun()
+
+            st.markdown("---")
+            st.markdown("#### 🧹 Script de nettoyage")
+            st.caption("Généré à partir des problèmes détectés (noms de colonnes, sans valeurs).")
+            if st.button("🧹 Générer un script de nettoyage", width="stretch"):
+                with st.spinner("🤖 Génération du script..."):
+                    try:
+                        st.session_state.cleaning_script = utils_openai.generate_cleaning_script(
+                            openai_client, df, profil, model=openai_model
+                        )
+                    except Exception as e:
+                        st.error(f"❌ Erreur lors de la génération: {str(e)}")
+            if st.session_state.get("cleaning_script"):
+                script = st.session_state.cleaning_script
+                st.code(script, language="python")
+                st.download_button("⬇️ Télécharger le script", script.encode("utf-8"),
+                                   file_name="nettoyage.py", mime="text/x-python")
     
     # ====== TAB 5: TESTS SUGGÉRÉS ======
     with tab5:
@@ -613,10 +498,13 @@ if page == "📊 Dashboard":
         if not openai_client:
             st.warning("⚠️ Fonctionnalité IA désactivée. Configurez OpenAI pour générer des tests.")
         else:
-            if st.button("🧪 Générer les Tests IA", type="primary", use_container_width=True):
+            if st.button("🧪 Générer les Tests IA", type="primary", width="stretch"):
                 with st.spinner("🤖 Génération des tests en cours..."):
                     try:
-                        tests = utils_openai.generate_tests(openai_client, df)
+                        tests = utils_openai.generate_tests(
+                            openai_client, df,
+                            include_samples=send_samples, model=openai_model
+                        )
                         st.session_state.tests = tests
                         st.success("✅ Tests générés avec succès!")
                     except Exception as e:
@@ -632,47 +520,53 @@ if page == "📊 Dashboard":
         
         st.info("""
         💡 **Options d'export disponibles:**
-        - Rapport HTML complet (recommandé)
-        - Rapport PDF (si pdfkit et wkhtmltopdf sont installés)
+        - Rapport PDF
+        - Rapport HTML complet
         - Données nettoyées (CSV : colonnes vides/constantes et doublons retirés)
         """)
         
-        # Générer le rapport
-        if utils_pdf:
-            synthesis_text = st.session_state.synthesis if st.session_state.synthesis else "Synthèse non générée. Utilisez l'onglet 'Synthèse IA' pour générer une analyse complète."
-            
-            col_export1, col_export2 = st.columns(2)
-            
-            with col_export1:
-                if st.button("📄 Générer le Rapport HTML/PDF", type="primary", use_container_width=True):
-                    with st.spinner("📝 Génération du rapport..."):
-                        try:
-                            html_content = utils_pdf.generate_pdf_html(synthesis_text, profil, df)
-                            export_link = utils_pdf.export_pdf(html_content)
-                            
-                            st.markdown("---")
-                            st.markdown("#### ✅ Rapport généré avec succès!")
-                            st.markdown(export_link, unsafe_allow_html=True)
-                            
-                        except Exception as e:
-                            st.error(f"❌ Erreur lors de la génération: {str(e)}")
-            
-            with col_export2:
-                # Export des données nettoyées (colonnes vides/constantes et doublons retirés)
-                cleaned = utils_data.clean_dataframe(df)
+        synthesis_text = st.session_state.synthesis or (
+            "Synthèse non générée. Utilisez l'onglet 'Synthèse IA' pour générer une analyse complète."
+        )
+        stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+
+        col_export1, col_export2, col_export3 = st.columns(3)
+
+        with col_export1:
+            try:
                 st.download_button(
-                    label="💾 Télécharger les données nettoyées (CSV)",
-                    data=cleaned.to_csv(index=False).encode('utf-8'),
-                    file_name=f"data_cleaned_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                    mime="text/csv",
-                    use_container_width=True
+                    "📄 Rapport PDF",
+                    data=utils_pdf.generate_pdf_bytes(synthesis_text, profil),
+                    file_name=f"rapport_data_quality_{stamp}.pdf",
+                    mime="application/pdf",
+                    type="primary",
+                    width="stretch",
                 )
-                st.caption(
-                    f"{len(df) - len(cleaned):,} ligne(s) et "
-                    f"{df.shape[1] - cleaned.shape[1]} colonne(s) retirées."
-                )
-        else:
-            st.warning("⚠️ Module utils_pdf non disponible. Export limité.")
+            except Exception as e:
+                st.error(f"❌ Erreur PDF : {e}")
+
+        with col_export2:
+            st.download_button(
+                "🌐 Rapport HTML",
+                data=utils_pdf.generate_pdf_html(synthesis_text, profil, df).encode("utf-8"),
+                file_name=f"rapport_data_quality_{stamp}.html",
+                mime="text/html",
+                width="stretch",
+            )
+
+        with col_export3:
+            cleaned = utils_data.clean_dataframe(df)
+            st.download_button(
+                "💾 Données nettoyées (CSV)",
+                data=cleaned.to_csv(index=False).encode('utf-8'),
+                file_name=f"data_cleaned_{stamp}.csv",
+                mime="text/csv",
+                width="stretch",
+            )
+            st.caption(
+                f"{len(df) - len(cleaned):,} ligne(s) et "
+                f"{df.shape[1] - cleaned.shape[1]} colonne(s) retirées."
+            )
 
 
 # ==================== PAGE: CONTACT ====================

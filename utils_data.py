@@ -241,7 +241,9 @@ def profile_data_quality(df: pd.DataFrame) -> Dict:
     
     # Score des outliers (normalisé)
     if profil["outliers"]:
-        outlier_rate = (profil["total_outliers"] / max(1, len(df))) * 100
+        # part de cellules numériques aberrantes (et non plus par ligne)
+        n_numeric_cells = max(1, len(df) * len(profil["outliers"]))
+        outlier_rate = (profil["total_outliers"] / n_numeric_cells) * 100
         out_score = max(0, 100 - outlier_rate)
     else:
         out_score = 100
