@@ -105,3 +105,38 @@ def test_column_summary_status():
 def test_score_label():
     assert utils_data.score_label(95) == "Bonne qualité"
     assert utils_data.score_label(10) == "Qualité critique"
+
+
+def test_clean_dataframe_options():
+    df = pd.DataFrame({"a": [1, 1, 2], "const": [0, 0, 0], "sparse": [None, None, 1], "t": [" x ", " x ", "y"]})
+    out = utils_data.clean_dataframe(df, drop_constant=False, drop_duplicates=False)
+    assert "const" in out.columns and len(out) == 3
+    out = utils_data.clean_dataframe(df, max_missing_pct=50, strip_text=True)
+    assert "sparse" not in out.columns and "const" not in out.columns
+    assert out["t"].tolist() == ["x", "y"]  # espaces retirés puis doublons supprimés
+    assert df["t"].iloc[0] == " x "  # original intact
+
+
+def test_get_problem_rows():
+    df = pd.DataFrame({"a": [1, 1, 2, None], "v": [1, 1, 1, 100.0]})
+    profil = utils_data.profile_data_quality(df)
+    assert len(utils_data.get_problem_rows(df, profil, "duplicates")) == 2
+    assert len(utils_data.get_problem_rows(df, profil, "missing", "a")) == 1
+    assert len(utils_data.get_problem_rows(df, profil, "missing")) == 1
+    assert utils_data.get_problem_rows(df, profil, "outliers", "v").index.tolist() == [3]
+    with pytest.raises(ValueError):
+        utils_data.get_problem_rows(df, profil, "nope")
+
+
+def test_charts_build():
+    import charts
+
+    df = pd.DataFrame({"a": [1, 2, 3, None, 100.0], "b": [1, 2, 3, 4, 5], "c": list("xyxyz")})
+    profil = utils_data.profile_data_quality(df)
+    assert charts.create_missing_chart(profil) is not None
+    assert charts.create_types_chart(profil["column_types"]) is not None
+    assert charts.create_outliers_chart(profil) is not None
+    assert charts.create_correlation_chart(profil["correlations"]) is not None
+    charts.create_numeric_charts(df["a"], "a")
+    fig, vc = charts.create_category_chart(df["c"], "c")
+    assert len(vc) == 3

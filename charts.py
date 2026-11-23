@@ -1,143 +1,112 @@
-"""Graphiques matplotlib/seaborn de la plateforme."""
+"""Graphiques Plotly interactifs de la plateforme."""
 
-import matplotlib.pyplot as plt
 import pandas as pd
-import seaborn as sns
+import plotly.express as px
+import plotly.graph_objects as go
+
+PRIMARY = "#667eea"
+SEVERITY_COLORS = {"critical": "#F44336", "high": "#FF9800", "medium": "#FFC107", "low": "#4CAF50"}
+
+
+def _style(fig, height=None):
+    """Style commun : fond transparent (thème clair/sombre), marges réduites."""
+    fig.update_layout(
+        margin=dict(l=10, r=10, t=50, b=10),
+        paper_bgcolor="rgba(0,0,0,0)",
+        plot_bgcolor="rgba(0,0,0,0)",
+        height=height,
+        title_font_size=16,
+    )
+    return fig
+
+
+def _severity(pct: float) -> str:
+    if pct > 50:
+        return "critical"
+    if pct > 30:
+        return "high"
+    if pct > 10:
+        return "medium"
+    return "low"
 
 
 def create_missing_chart(profil, top_n=10):
-    """Crée un graphique des colonnes avec le plus de valeurs manquantes."""
-    mp = profil["missing_pct"]
-    if isinstance(mp, dict):
-        mp = pd.Series(mp)
-    
+    """Barres horizontales des colonnes avec le plus de valeurs manquantes."""
+    mp = pd.Series(profil["missing_pct"])
     mp = mp[mp > 0].sort_values(ascending=False).head(top_n)
-    
-    if mp.empty or mp.sum() == 0:
+    if mp.empty:
         return None
-    
-    fig, ax = plt.subplots(figsize=(10, max(5, len(mp) * 0.4)))
-    
-    # Couleurs basées sur le niveau de sévérité
-    colors_list = [
-        '#F44336' if x > 50 else 
-        '#FF9800' if x > 30 else 
-        '#FFC107' if x > 10 else 
-        '#4CAF50' 
-        for x in mp.values
-    ]
-    
-    mp.plot(kind='barh', ax=ax, color=colors_list, edgecolor='white', linewidth=1.5)
-    ax.set_xlabel("Pourcentage de valeurs manquantes (%)", fontsize=11, fontweight='bold')
-    ax.set_title(f"Top {len(mp)} colonnes avec valeurs manquantes", fontsize=13, fontweight='bold', pad=15)
-    ax.invert_yaxis()
-    ax.grid(axis='x', alpha=0.3, linestyle='--')
-    
-    # Ajouter les valeurs sur les barres
-    for i, v in enumerate(mp.values):
-        ax.text(v + 1, i, f"{v:.1f}%", va='center', fontweight='bold', fontsize=10)
-    
-    plt.tight_layout()
-    return fig
+
+    fig = go.Figure(go.Bar(
+        x=mp.values, y=[str(c) for c in mp.index], orientation="h",
+        marker_color=[SEVERITY_COLORS[_severity(v)] for v in mp.values],
+        text=[f"{v:.1f} %" for v in mp.values], textposition="outside",
+        hovertemplate="%{y} : %{x:.1f} %<extra></extra>",
+    ))
+    fig.update_xaxes(title="Valeurs manquantes (%)", range=[0, 125])
+    fig.update_yaxes(autorange="reversed")
+    fig.update_layout(title=f"Top {len(mp)} colonnes avec valeurs manquantes")
+    return _style(fig, height=max(300, 40 * len(mp) + 100))
 
 
 def create_types_chart(col_types):
-    """Crée un pie chart de la distribution des types de colonnes."""
+    """Donut de la répartition des types de colonnes."""
     s = pd.Series(col_types).value_counts()
-    
-    fig, ax = plt.subplots(figsize=(8, 6))
-    
-    colors = ['#2196F3', '#4CAF50', '#FFC107', '#F44336', '#9C27B0', '#00BCD4']
-    explode = [0.05] * len(s)
-    
-    wedges, texts, autotexts = ax.pie(
-        s,
-        autopct="%1.1f%%",
-        startangle=90,
-        colors=colors[:len(s)],
-        explode=explode,
-        shadow=True,
-        textprops={'fontsize': 11, 'fontweight': 'bold'}
-    )
-    
-    ax.legend(wedges, s.index, title="Types", loc="center left", bbox_to_anchor=(1, 0, 0.5, 1))
-    ax.set_title("Distribution des types de colonnes", fontsize=14, fontweight='bold', pad=20)
-    
-    plt.tight_layout()
-    return fig
+    fig = go.Figure(go.Pie(
+        labels=s.index.tolist(), values=s.values.tolist(), hole=0.5,
+        marker=dict(colors=px.colors.qualitative.Set2),
+        hovertemplate="%{label} : %{value} colonne(s)<extra></extra>",
+    ))
+    fig.update_layout(title="Types de colonnes")
+    return _style(fig, height=380)
 
 
-def create_outliers_heatmap(profil):
-    """Crée une heatmap des outliers par colonne."""
-    outliers = profil.get("outliers", {})
-    
-    if not outliers or all(v == 0 for v in outliers.values()):
+def create_outliers_chart(profil, top_n=15):
+    """Barres du nombre d'outliers (IQR) par colonne numérique."""
+    outliers = {k: v for k, v in profil.get("outliers", {}).items() if v > 0}
+    if not outliers:
         return None
-    
-    # Filtrer les colonnes avec outliers
-    outliers_filtered = {k: v for k, v in outliers.items() if v > 0}
-    
-    if not outliers_filtered:
-        return None
-    
-    outlier_df = pd.DataFrame(
-        list(outliers_filtered.items()), 
-        columns=["Colonne", "Nb Outliers"]
-    ).set_index("Colonne")
-    
-    fig, ax = plt.subplots(figsize=(10, max(3, len(outlier_df) * 0.5)))
-    
-    sns.heatmap(
-        outlier_df,
-        annot=True,
-        fmt="d",
-        cmap="Reds",
-        ax=ax,
-        cbar_kws={"label": "Nombre d'outliers"},
-        linewidths=1,
-        linecolor='white'
-    )
-    
-    ax.set_title("Détection d'outliers (méthode IQR)", fontsize=13, fontweight='bold', pad=15)
-    plt.tight_layout()
-    
-    return fig
+    s = pd.Series(outliers).sort_values(ascending=False).head(top_n)
+    fig = go.Figure(go.Bar(
+        x=s.values, y=[str(c) for c in s.index], orientation="h",
+        marker_color="#EF5350", text=s.values, textposition="outside",
+        hovertemplate="%{y} : %{x} outlier(s)<extra></extra>",
+    ))
+    fig.update_yaxes(autorange="reversed")
+    fig.update_xaxes(title="Nombre d'outliers")
+    fig.update_layout(title="Outliers par colonne (méthode IQR)")
+    return _style(fig, height=max(250, 40 * len(s) + 100))
 
 
 def create_correlation_chart(corr):
-    """Heatmap de la matrice de corrélation."""
-    size = min(14, max(6, len(corr) * 0.6))
-    fig, ax = plt.subplots(figsize=(size, size * 0.85))
-    sns.heatmap(corr, annot=len(corr) <= 15, fmt=".2f", cmap="coolwarm",
-                center=0, ax=ax, linewidths=0.5)
-    ax.set_title("Corrélations entre variables numériques", fontsize=14, fontweight='bold', pad=15)
-    return fig
+    """Heatmap interactive de la matrice de corrélation."""
+    fig = px.imshow(
+        corr, zmin=-1, zmax=1, color_continuous_scale="RdBu_r",
+        text_auto=".2f" if len(corr) <= 12 else False, aspect="auto",
+    )
+    fig.update_layout(title="Corrélations entre variables numériques")
+    return _style(fig, height=min(800, max(350, 60 * len(corr))))
 
 
 def create_numeric_charts(series, name):
     """Histogramme et boxplot d'une colonne numérique."""
-    fig_dist, ax = plt.subplots(figsize=(8, 5))
-    series.dropna().hist(bins=30, ax=ax, color="#667eea", edgecolor="white")
-    ax.set_xlabel(name)
-    ax.set_ylabel("Fréquence")
-    ax.set_title(f"Distribution de {name}")
-    ax.grid(alpha=0.3)
-
-    fig_box, ax = plt.subplots(figsize=(8, 5))
-    series.dropna().plot.box(ax=ax, color=dict(boxes='#667eea', whiskers='#764ba2', medians='#F44336'))
-    ax.set_ylabel(name)
-    ax.set_title(f"Boxplot de {name}")
-    ax.grid(axis='y', alpha=0.3)
-    return fig_dist, fig_box
+    clean = series.dropna()
+    fig_dist = px.histogram(clean, nbins=30, color_discrete_sequence=[PRIMARY])
+    fig_dist.update_layout(title=f"Distribution de {name}", showlegend=False,
+                           xaxis_title=str(name), yaxis_title="Fréquence")
+    fig_box = px.box(clean, points="outliers", color_discrete_sequence=[PRIMARY])
+    fig_box.update_layout(title=f"Boxplot de {name}", showlegend=False, yaxis_title=str(name))
+    return _style(fig_dist, 380), _style(fig_box, 380)
 
 
 def create_category_chart(series, name, top_n=20):
     """Top valeurs d'une colonne non numérique."""
     value_counts = series.value_counts().head(top_n)
-    fig, ax = plt.subplots(figsize=(10, 6))
-    value_counts.plot(kind='barh', ax=ax, color='#667eea')
-    ax.set_xlabel("Fréquence")
-    ax.set_title(f"Top {top_n} valeurs de {name}")
-    ax.invert_yaxis()
-    ax.grid(axis='x', alpha=0.3)
-    return fig, value_counts
+    fig = go.Figure(go.Bar(
+        x=value_counts.values, y=[str(v) for v in value_counts.index], orientation="h",
+        marker_color=PRIMARY, hovertemplate="%{y} : %{x}<extra></extra>",
+    ))
+    fig.update_yaxes(autorange="reversed")
+    fig.update_xaxes(title="Fréquence")
+    fig.update_layout(title=f"Top {len(value_counts)} valeurs de {name}")
+    return _style(fig, height=max(300, 28 * len(value_counts) + 100)), value_counts

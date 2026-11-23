@@ -7,7 +7,10 @@ Application **Streamlit** qui analyse la qualité de n'importe quelle base struc
 - Profiling : valeurs manquantes, doublons, colonnes vides/constantes, haute cardinalité, outliers (IQR), corrélations
 - Score global de qualité (voir ci-dessous) et « quick wins » actionnables
 - Synthèse, tests de qualité et script de nettoyage générés par IA (optionnel)
-- Exports : rapport PDF, rapport HTML, CSV nettoyé (colonnes vides/constantes et doublons retirés)
+- Tableau de synthèse par colonne (statut, alertes, filtres) et graphiques interactifs Plotly
+- Onglet « Lignes à corriger » : doublons, valeurs manquantes et outliers, téléchargeables en CSV
+- Nettoyage configurable avec aperçu avant/après (score, lignes, colonnes)
+- Exports : rapport PDF, rapport HTML, CSV nettoyé
 
 ## Score global (0-100)
 | Composante | Poids | Calcul |
@@ -33,4 +36,4 @@ Lors d'un appel IA, seules des statistiques agrégées (noms de colonnes, types,
 pip install -r requirements-dev.txt
 python -m pytest
 ```
-Structure : `streamlit_app.py` (interface) · `utils_data.py` (profiling) · `charts.py` (graphiques) · `utils_openai.py` (IA) · `utils_pdf.py` (rapports) · `styles.py` (CSS).
+Structure : `streamlit_app.py` (interface) · `utils_data.py` (profiling, nettoyage) · `charts.py` (graphiques Plotly) · `utils_openai.py` (IA) · `utils_pdf.py` (rapports) · `styles.py` (CSS).

@@ -292,10 +292,60 @@ def profile_data_quality(df: pd.DataFrame) -> Dict:
     return profil
 
 
-def clean_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """Nettoyage minimal : supprime colonnes vides/constantes et doublons."""
-    to_drop = [c for c in df.columns if df[c].nunique(dropna=True) <= 1]
-    return df.drop(columns=to_drop).drop_duplicates()
+def clean_dataframe(df: pd.DataFrame, drop_empty: bool = True, drop_constant: bool = True,
+                    drop_duplicates: bool = True, max_missing_pct: Optional[float] = None,
+                    strip_text: bool = False) -> pd.DataFrame:
+    """Nettoyage configurable. Ne modifie pas le DataFrame d'origine.
+
+    Args:
+        drop_empty: supprime les colonnes entièrement vides
+        drop_constant: supprime les colonnes à valeur unique (vides comprises)
+        drop_duplicates: supprime les lignes dupliquées
+        max_missing_pct: supprime les colonnes dépassant ce % de valeurs manquantes
+        strip_text: retire les espaces en début/fin des colonnes texte
+    """
+    out = df.copy()
+    to_drop = set()
+    for col in out.columns:
+        nunique = out[col].nunique(dropna=True)
+        if drop_empty and nunique == 0:
+            to_drop.add(col)
+        if drop_constant and nunique <= 1:
+            to_drop.add(col)
+        if max_missing_pct is not None and out[col].isna().mean() * 100 > max_missing_pct:
+            to_drop.add(col)
+    out = out.drop(columns=list(to_drop))
+
+    if strip_text:
+        for col in out.select_dtypes(include=["object", "string"]).columns:
+            out[col] = out[col].map(lambda v: v.strip() if isinstance(v, str) else v)
+    if drop_duplicates:
+        out = out.drop_duplicates()
+    return out
+
+
+def get_problem_rows(df: pd.DataFrame, profil: Dict, kind: str,
+                     column: Optional[str] = None) -> pd.DataFrame:
+    """Lignes concernées par un problème de qualité.
+
+    Args:
+        kind: "duplicates", "missing" ou "outliers"
+        column: colonne ciblée (obligatoire pour "outliers", optionnelle pour "missing")
+    """
+    if kind == "duplicates":
+        rows = df[df.duplicated(keep=False)]
+        try:
+            return rows.sort_values(list(df.columns))
+        except TypeError:
+            return rows
+    if kind == "missing":
+        mask = df[column].isna() if column else df.isna().any(axis=1)
+        return df[mask]
+    if kind == "outliers":
+        if column is None:
+            raise ValueError("column requis pour kind='outliers'")
+        return df.loc[profil.get("outlier_indices", {}).get(column, [])]
+    raise ValueError(f"kind inconnu : {kind}")
 
 
 def score_label(score: float) -> str:

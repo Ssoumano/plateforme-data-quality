@@ -7,7 +7,6 @@ Application Streamlit pour l'analyse de la qualité des données
 import streamlit as st
 import pandas as pd
 import numpy as np
-import matplotlib.pyplot as plt
 import html
 from datetime import datetime
 
@@ -103,9 +102,18 @@ Version 2.0
 # ==================== FONCTIONS UTILITAIRES ====================
 
 def show_fig(fig):
-    """Affiche une figure matplotlib puis la ferme (évite la fuite mémoire)."""
-    st.pyplot(fig)
-    plt.close(fig)
+    """Affiche une figure Plotly interactive."""
+    st.plotly_chart(fig, width="stretch")
+
+
+def score_bar(score: float):
+    """Barre de score colorée selon le niveau (rouge → vert)."""
+    color = "#4CAF50" if score >= 80 else "#FFC107" if score >= 60 else "#FF9800" if score >= 40 else "#F44336"
+    st.markdown(
+        f"<div style='background:rgba(128,128,128,.25);border-radius:8px;height:12px;overflow:hidden'>"
+        f"<div style='background:{color};width:{min(max(score, 0), 100)}%;height:100%'></div></div>",
+        unsafe_allow_html=True,
+    )
 
 
 
@@ -237,7 +245,7 @@ if page == "📊 Dashboard":
             st.caption("SCORE DE QUALITÉ")
             st.markdown(f"## {score:.0f} / 100")
             st.markdown(f"**{utils_data.score_label(score)}**")
-            st.progress(min(max(score / 100, 0.0), 1.0))
+            score_bar(score)
             with st.expander("Comment est calculé le score ?"):
                 details = profil["score_details"]
                 st.table(pd.DataFrame({
@@ -271,10 +279,11 @@ if page == "📊 Dashboard":
 
     # ==================== ONGLETS D'ANALYSE ====================
     
-    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+    tab1, tab2, tab3, tab_rows, tab4, tab5, tab6 = st.tabs([
         "📊 Aperçu", 
         "📈 Visualisations", 
         "🔍 Profiling Détaillé",
+        "🔎 Lignes à corriger",
         "🤖 Synthèse IA",
         "🧪 Tests Suggérés",
         "📄 Export"
@@ -347,8 +356,8 @@ if page == "📊 Dashboard":
             show_fig(fig_types)
         
         # Heatmap des outliers
-        st.markdown("#### ⚡ Heatmap des Outliers (IQR)")
-        fig_outliers = charts.create_outliers_heatmap(profil)
+        st.markdown("#### ⚡ Outliers par colonne (IQR)")
+        fig_outliers = charts.create_outliers_chart(profil)
         
         if fig_outliers:
             show_fig(fig_outliers)
@@ -450,6 +459,48 @@ if page == "📊 Dashboard":
                 
                 st.dataframe(value_counts.to_frame("Fréquence"), width="stretch")
     
+    # ====== TAB: LIGNES À CORRIGER ======
+    with tab_rows:
+        st.markdown("### 🔎 Lignes à corriger")
+        st.caption("Retrouvez et téléchargez les lignes concernées par un problème de qualité.")
+
+        kind_label = st.radio(
+            "Type de problème",
+            ["Doublons", "Valeurs manquantes", "Outliers"],
+            horizontal=True,
+        )
+        kind = {"Doublons": "duplicates", "Valeurs manquantes": "missing", "Outliers": "outliers"}[kind_label]
+
+        column = None
+        if kind == "missing":
+            options = ["(toutes les colonnes)"] + [str(c) for c in df.columns if profil["missing_count"][c] > 0]
+            choice = st.selectbox("Colonne", options)
+            column = None if choice == options[0] else next(c for c in df.columns if str(c) == choice)
+        elif kind == "outliers":
+            outlier_cols = [str(c) for c, n in profil.get("outliers", {}).items() if n > 0]
+            if outlier_cols:
+                choice = st.selectbox("Colonne numérique", outlier_cols)
+                column = next(c for c in df.columns if str(c) == choice)
+
+        if kind == "outliers" and column is None:
+            st.success("✅ Aucun outlier détecté.")
+        else:
+            problem_rows = utils_data.get_problem_rows(df, profil, kind, column)
+            if problem_rows.empty:
+                st.success("✅ Aucune ligne concernée.")
+            else:
+                st.warning(f"{len(problem_rows):,} ligne(s) concernée(s) "
+                           f"({len(problem_rows) / max(1, len(df)) * 100:.1f} % du fichier)")
+                st.caption("L'index est le numéro de ligne dans le fichier d'origine (à partir de 0, hors en-tête).")
+                st.dataframe(problem_rows.head(1000), width="stretch", height=400)
+                if len(problem_rows) > 1000:
+                    st.caption("Aperçu limité à 1 000 lignes ; le téléchargement contient tout.")
+                st.download_button(
+                    "⬇️ Télécharger ces lignes (CSV)",
+                    problem_rows.to_csv().encode("utf-8"),
+                    file_name=f"lignes_{kind}.csv", mime="text/csv",
+                )
+
     # ====== TAB 4: SYNTHÈSE IA ======
     with tab4:
         st.markdown("### 🤖 Synthèse & Recommandations IA")
@@ -540,7 +591,7 @@ if page == "📊 Dashboard":
         💡 **Options d'export disponibles:**
         - Rapport PDF
         - Rapport HTML complet
-        - Données nettoyées (CSV : colonnes vides/constantes et doublons retirés)
+        - Données nettoyées avec aperçu avant/après
         """)
         
         synthesis_text = st.session_state.synthesis or (
@@ -548,7 +599,7 @@ if page == "📊 Dashboard":
         )
         stamp = datetime.now().strftime('%Y%m%d_%H%M%S')
 
-        col_export1, col_export2, col_export3 = st.columns(3)
+        col_export1, col_export2 = st.columns(2)
 
         with col_export1:
             try:
@@ -572,19 +623,47 @@ if page == "📊 Dashboard":
                 width="stretch",
             )
 
-        with col_export3:
-            cleaned = utils_data.clean_dataframe(df)
-            st.download_button(
-                "💾 Données nettoyées (CSV)",
-                data=cleaned.to_csv(index=False).encode('utf-8'),
-                file_name=f"data_cleaned_{stamp}.csv",
-                mime="text/csv",
-                width="stretch",
-            )
-            st.caption(
-                f"{len(df) - len(cleaned):,} ligne(s) et "
-                f"{df.shape[1] - cleaned.shape[1]} colonne(s) retirées."
-            )
+        st.markdown("---")
+        st.markdown("#### 🧹 Nettoyage des données")
+        opt1, opt2 = st.columns(2)
+        with opt1:
+            o_empty = st.checkbox("Supprimer les colonnes vides", value=True)
+            o_const = st.checkbox("Supprimer les colonnes constantes", value=True)
+            o_dups = st.checkbox("Supprimer les lignes dupliquées", value=True)
+        with opt2:
+            o_strip = st.checkbox("Retirer les espaces en début/fin de texte", value=False)
+            o_missing = st.checkbox("Supprimer les colonnes très incomplètes", value=False)
+            max_missing = st.slider("Seuil de valeurs manquantes (%)", 10, 99, 50,
+                                    disabled=not o_missing)
+
+        cleaned = utils_data.clean_dataframe(
+            df, drop_empty=o_empty, drop_constant=o_const, drop_duplicates=o_dups,
+            max_missing_pct=max_missing if o_missing else None, strip_text=o_strip,
+        )
+        before_profil = profil
+        after_profil = utils_data.profile_data_quality(cleaned) if len(cleaned.columns) else None
+
+        st.markdown("**Avant → après**")
+        m1, m2, m3, m4 = st.columns(4)
+        m1.metric("Lignes", f"{len(cleaned):,}", delta=f"{len(cleaned) - len(df):,}", delta_color="off")
+        m2.metric("Colonnes", cleaned.shape[1], delta=cleaned.shape[1] - df.shape[1], delta_color="off")
+        if after_profil:
+            m3.metric("Score", f"{after_profil['global_score']:.0f} / 100",
+                      delta=f"{after_profil['global_score'] - before_profil['global_score']:+.1f}")
+            m4.metric("Valeurs manquantes", f"{after_profil['total_missing']:,}",
+                      delta=f"{after_profil['total_missing'] - before_profil['total_missing']:,}",
+                      delta_color="inverse")
+        else:
+            st.warning("Toutes les colonnes seraient supprimées : assouplissez les options.")
+
+        st.download_button(
+            "💾 Télécharger les données nettoyées (CSV)",
+            data=cleaned.to_csv(index=False).encode("utf-8"),
+            file_name=f"data_cleaned_{stamp}.csv",
+            mime="text/csv",
+            type="primary",
+            disabled=cleaned.empty and cleaned.shape[1] == 0,
+        )
 
 
 # ==================== PAGE: CONTACT ====================
