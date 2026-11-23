@@ -1,4 +1,3 @@
-# utils_openai.py
 
 from openai import OpenAI
 from typing import Dict, Optional
@@ -16,15 +15,7 @@ def _samples(series: pd.Series, n: int) -> list:
 
 
 def get_openai_client(api_key: Optional[str] = None) -> OpenAI:
-    """
-    Crée un client OpenAI.
-    
-    Args:
-        api_key: Clé API OpenAI
-        
-    Returns:
-        OpenAI: Client OpenAI initialisé
-    """
+    """Crée un client OpenAI."""
     if api_key:
         return OpenAI(api_key=api_key)
     return OpenAI()  # Utilise la variable d'environnement OPENAI_API_KEY
@@ -32,18 +23,7 @@ def get_openai_client(api_key: Optional[str] = None) -> OpenAI:
 
 def generate_synthesis(client: OpenAI, df: pd.DataFrame, profil: Dict,
                        include_samples: bool = False, model: str = DEFAULT_MODEL) -> str:
-    """
-    Génère une synthèse professionnelle de la qualité des données via IA.
-    
-    Args:
-        client: Client OpenAI
-        df: DataFrame analysé
-        profil: Dictionnaire de profil de qualité
-        
-    Returns:
-        str: Synthèse en markdown
-    """
-    # Créer un échantillon du schéma avec exemples
+    """Génère une synthèse professionnelle de la qualité des données via IA."""
     schema_samples = []
     for col in df.columns[:20]:  # Limiter à 20 colonnes pour le prompt
         dtype = profil["dtypes"][col]
@@ -53,10 +33,9 @@ def generate_synthesis(client: OpenAI, df: pd.DataFrame, profil: Dict,
         schema_samples.append(
             f"- **{col}** ({dtype}) | Valeurs manquantes: {missing_pct}%{examples}"
         )
-    
+
     schema_text = "\n".join(schema_samples)
-    
-    # Construire le contexte détaillé
+
     context = f"""
 ## DATASET ANALYSÉ
 
@@ -88,7 +67,7 @@ def generate_synthesis(client: OpenAI, df: pd.DataFrame, profil: Dict,
 """
 
     prompt = f"""
-Tu es un **consultant expert en Data Quality et Data Engineering** avec 15 ans d'expérience.
+Tu es spécialiste de la qualité des données.
 
 Voici le contexte complet d'un dataset que tu dois analyser:
 
@@ -101,60 +80,49 @@ Voici le contexte complet d'un dataset que tu dois analyser:
    - Identifie les 3 problèmes majeurs par ordre de criticité
    - Explique l'impact métier de ces problèmes
    - Utilise un ton professionnel mais accessible
-   - Utilise des emojis pertinents pour la lisibilité (⚠️ 🔍 ✅ 📊)
 
 2) **Tableau de Priorisation**
    Crée un tableau markdown avec ces colonnes:
    | Priorité | Problème | Colonnes concernées | Impact | Recommandation |
-   
+
    Inclus 5-7 lignes par ordre de priorité décroissante.
 
 3) **Quick Wins** (5 actions rapides)
    Liste 5 actions concrètes et immédiatement applicables avec:
-   - 🎯 Action
-   - 💡 Bénéfice attendu
-   - ⏱️ Effort estimé (Faible/Moyen/Élevé)
+   - Action
+   - Bénéfice attendu
+   - ⏱ Effort estimé (Faible/Moyen/Élevé)
 
 4) **Tests de Qualité Recommandés**
    Suggère 3-5 tests automatisés à mettre en place
 
 **FORMAT DE RÉPONSE:**
 Utilise le markdown avec des sections claires, des tableaux, et des listes à puces.
-Sois concret, actionnable et professionnel.
+Sois concret et précis.
 """
 
     response = client.chat.completions.create(
         model=model,
         messages=[
             {
-                "role": "system", 
-                "content": "Tu es un consultant expert en Data Quality avec une expertise approfondie en analyse de données, data engineering et gouvernance des données. Tu fournis des analyses professionnelles, actionnables et orientées business."
+                "role": "system",
+                "content": "Tu analyses la qualité de jeux de données et proposes des corrections concrètes."
             },
             {
-                "role": "user", 
+                "role": "user",
                 "content": prompt
             }
         ],
         max_tokens=1500,
         temperature=0.7
     )
-    
+
     return response.choices[0].message.content
 
 
 def generate_tests(client: OpenAI, df: pd.DataFrame,
                    include_samples: bool = False, model: str = DEFAULT_MODEL) -> str:
-    """
-    Génère des tests de qualité de données adaptés au dataset.
-    
-    Args:
-        client: Client OpenAI
-        df: DataFrame à tester
-        
-    Returns:
-        str: Liste de tests en markdown
-    """
-    # Créer un aperçu du schéma
+    """Génère des tests de qualité de données adaptés au dataset."""
     schema_info = []
     for col in df.columns[:15]:
         dtype = str(df[col].dtype)
@@ -165,11 +133,11 @@ def generate_tests(client: OpenAI, df: pd.DataFrame,
         schema_info.append(
             f"- **{col}** ({dtype}): {nunique} valeurs uniques, {missing} NaN{examples}"
         )
-    
+
     schema_text = "\n".join(schema_info)
-    
+
     prompt = f"""
-Tu es un expert en **Data Quality Testing** et en automatisation de tests.
+Tu écris des tests de qualité de données.
 
 Voici le schéma d'un dataset à tester:
 
@@ -212,7 +180,7 @@ Fournis du code Python **EXÉCUTABLE** utilisant pandas.
         messages=[
             {
                 "role": "system",
-                "content": "Tu es un expert en tests de qualité de données et en validation de datasets. Tu crées des tests concrets, exécutables et adaptés au contexte spécifique de chaque dataset."
+                "content": "Tu écris des tests de qualité de données concrets, exécutables et adaptés au jeu de données fourni."
             },
             {
                 "role": "user",
@@ -222,40 +190,30 @@ Fournis du code Python **EXÉCUTABLE** utilisant pandas.
         max_tokens=2000,
         temperature=0.6
     )
-    
+
     return response.choices[0].message.content
 
 
 def generate_cleaning_script(client: OpenAI, df: pd.DataFrame, profil: Dict,
                              model: str = DEFAULT_MODEL) -> str:
-    """
-    Génère un script Python complet de nettoyage des données.
-    
-    Args:
-        client: Client OpenAI
-        df: DataFrame à nettoyer
-        profil: Profil de qualité
-        
-    Returns:
-        str: Script Python commenté
-    """
+    """Génère un script Python complet de nettoyage des données."""
     problems = []
-    
+
     if profil["empty_columns"]:
         problems.append(f"Colonnes vides: {profil['empty_columns']}")
-    
+
     if profil["constant_columns"]:
         problems.append(f"Colonnes constantes: {profil['constant_columns']}")
-    
+
     if profil["duplicate_rows"] > 0:
         problems.append(f"{profil['duplicate_rows']} lignes dupliquées")
-    
+
     high_missing = profil["missing_pct"][profil["missing_pct"] > 30]
     if not high_missing.empty:
         problems.append(f"Colonnes avec >30% de NaN: {high_missing.index.tolist()}")
-    
+
     problems_text = "\n".join([f"- {p}" for p in problems])
-    
+
     prompt = f"""
 Génère un script Python complet et exécutable pour nettoyer ce dataset.
 
@@ -279,7 +237,7 @@ Format: Code Python pur avec commentaires détaillés.
         messages=[
             {
                 "role": "system",
-                "content": "Tu es un expert en data cleaning et préparation de données. Tu écris du code Python propre, commenté et exécutable."
+                "content": "Tu écris du code Python pandas de nettoyage de données, commenté et exécutable."
             },
             {
                 "role": "user",
@@ -289,7 +247,7 @@ Format: Code Python pur avec commentaires détaillés.
         max_tokens=1500,
         temperature=0.5
     )
-    
+
     code = response.choices[0].message.content.strip()
     if code.startswith("```"):  # retire les clôtures markdown
         code = "\n".join(l for l in code.splitlines() if not l.strip().startswith("```"))
