@@ -12,10 +12,10 @@ from datetime import datetime
 
 # Configuration de la page
 st.set_page_config(
-    page_title="Data Quality Platform - PRO",
+    page_title="Data Quality Platform",
     page_icon="📊",
     layout="wide",
-    initial_sidebar_state="expanded"
+    initial_sidebar_state="auto"
 )
 
 # Import des modules utilitaires
@@ -25,7 +25,7 @@ import utils_data
 import utils_openai
 import utils_pdf
 
-st.markdown(styles.POWERBI_CSS, unsafe_allow_html=True)
+st.markdown(styles.APP_CSS, unsafe_allow_html=True)
 
 
 # ==================== INITIALISATION SESSION STATE ====================
@@ -61,42 +61,27 @@ except Exception:
     openai_model = utils_openai.DEFAULT_MODEL
 
 
-# ==================== SIDEBAR NAVIGATION ====================
-st.sidebar.title("🧭 Navigation")
-st.sidebar.markdown("---")
+# ==================== SIDEBAR ====================
+st.sidebar.markdown("## Data Quality")
+st.sidebar.caption("Analyse automatique de la qualité de vos données")
 
-page = st.sidebar.radio(
-    "Aller à",
-    ["📊 Dashboard", "📞 Contact"],
-    label_visibility="collapsed"
-)
+page = st.sidebar.radio("Navigation", ["Dashboard", "Contact"], label_visibility="collapsed")
 
-st.sidebar.markdown("---")
-
-# Informations sur le statut
+st.sidebar.divider()
+st.sidebar.markdown("**Assistant IA**")
 if openai_client:
-    st.sidebar.success("✅ IA activée")
-    send_samples = st.sidebar.checkbox(
-        "Envoyer des exemples de valeurs à OpenAI",
+    st.sidebar.caption("● Activé")
+    send_samples = st.sidebar.toggle(
+        "Envoyer des exemples de valeurs",
         value=False,
         help="Désactivé : seules des statistiques agrégées (noms de colonnes, types, taux de "
-             "manquants) sont transmises. Activé : 2-3 valeurs par colonne sont aussi envoyées "
-             "à OpenAI. À éviter pour des données personnelles ou confidentielles.",
+             "manquants) sont transmises à OpenAI. Activé : 2-3 valeurs par colonne sont aussi "
+             "envoyées. À éviter pour des données personnelles ou confidentielles.",
     )
-    st.sidebar.caption("🔒 Les données du fichier ne quittent l'application que lors d'un appel IA.")
+    st.sidebar.caption("Les données du fichier ne quittent l'application que lors d'un appel IA.")
 else:
     send_samples = False
-    st.sidebar.warning("⚠️ IA désactivée")
-
-st.sidebar.markdown("---")
-st.sidebar.markdown("### 📌 À propos")
-st.sidebar.info("""
-**Data Quality Platform - PRO**
-
-Analysez la qualité de vos données avec des insights IA et des recommandations actionnables.
-
-Version 2.0
-""")
+    st.sidebar.caption("○ Désactivé — ajoutez une clé `OPENAI_API_KEY` dans les secrets.")
 
 
 # ==================== FONCTIONS UTILITAIRES ====================
@@ -119,12 +104,12 @@ def score_bar(score: float):
 
 # ==================== PAGE: DASHBOARD ====================
 
-if page == "📊 Dashboard":
+if page == "Dashboard":
     
     has_data = st.session_state.df is not None
 
     # En-tête (compact une fois un fichier chargé, pour montrer le verdict sans scroller)
-    st.title("📊 Data Quality Platform — PRO")
+    st.title("Data Quality Platform")
     if not has_data:
         st.markdown("""
         <p style='font-size: 1.1rem; opacity: .75; margin-bottom: 1.5rem;'>
@@ -145,11 +130,11 @@ if page == "📊 Dashboard":
     if not has_data:
         with uploader_cols[1]:
             st.info("""
-            **💡 Formats acceptés:**
+            **Formats acceptés**
             - CSV (délimiteur auto-détecté)
             - Excel (.xlsx, .xls)
 
-            **📊 Analyses incluses:**
+            **Analyses incluses**
             - Profiling automatique
             - Détection d'anomalies
             - Recommandations IA
@@ -159,7 +144,7 @@ if page == "📊 Dashboard":
     if uploaded_file is None and st.session_state.df is None:
         if True:
             st.markdown("---")
-            st.markdown("### 🎯 Comment ça marche ?")
+            st.markdown("### Comment ça marche ?")
             
             col1, col2, col3, col4 = st.columns(4)
             
@@ -280,18 +265,18 @@ if page == "📊 Dashboard":
     # ==================== ONGLETS D'ANALYSE ====================
     
     tab1, tab2, tab3, tab_rows, tab4, tab5, tab6 = st.tabs([
-        "📊 Aperçu", 
-        "📈 Visualisations", 
-        "🔍 Profiling Détaillé",
-        "🔎 Lignes à corriger",
-        "🤖 Synthèse IA",
-        "🧪 Tests Suggérés",
-        "📄 Export"
+        "Aperçu", 
+        "Visualisations", 
+        "Profiling détaillé",
+        "Lignes à corriger",
+        "Synthèse IA",
+        "Tests suggérés",
+        "Export"
     ])
     
     # ====== TAB 1: APERÇU ======
     with tab1:
-        st.markdown("### 📋 Aperçu du Dataset")
+        st.markdown("### Aperçu du Dataset")
         
         # Options d'affichage
         col_opt1, col_opt2 = st.columns([1, 3])
@@ -305,7 +290,7 @@ if page == "📊 Dashboard":
         st.dataframe(df.head(n_rows), width="stretch", height=400)
         
         # Informations rapides
-        st.markdown("### 📊 Informations Rapides")
+        st.markdown("### Informations Rapides")
         
         col_info1, col_info2 = st.columns(2)
         
@@ -328,7 +313,7 @@ if page == "📊 Dashboard":
 
         quick_wins = utils_data.generate_quick_wins(profil)
         if quick_wins:
-            st.markdown("### ⚡ Quick Wins")
+            st.markdown("### Quick Wins")
             for qw in quick_wins:
                 with st.expander(f"[{qw['priority']}] {qw['action']}"):
                     st.write(f"**Impact :** {qw['impact']}")
@@ -337,13 +322,13 @@ if page == "📊 Dashboard":
     
     # ====== TAB 2: VISUALISATIONS ======
     with tab2:
-        st.markdown("### 📊 Visualisations Avancées")
+        st.markdown("### Visualisations Avancées")
         
         # Graphiques côte à côte
         col_viz1, col_viz2 = st.columns(2)
         
         with col_viz1:
-            st.markdown("#### 🔴 Valeurs Manquantes")
+            st.markdown("#### Valeurs Manquantes")
             fig_missing = charts.create_missing_chart(profil)
             if fig_missing:
                 show_fig(fig_missing)
@@ -351,12 +336,12 @@ if page == "📊 Dashboard":
                 st.success("✅ Aucune valeur manquante significative!")
         
         with col_viz2:
-            st.markdown("#### 🎨 Distribution des Types")
+            st.markdown("#### Distribution des Types")
             fig_types = charts.create_types_chart(profil['column_types'])
             show_fig(fig_types)
         
         # Heatmap des outliers
-        st.markdown("#### ⚡ Outliers par colonne (IQR)")
+        st.markdown("#### Outliers par colonne (IQR)")
         fig_outliers = charts.create_outliers_chart(profil)
         
         if fig_outliers:
@@ -366,13 +351,13 @@ if page == "📊 Dashboard":
         
         # Matrice de corrélation
         if not profil['correlations'].empty:
-            st.markdown("#### 🔗 Matrice de Corrélation")
+            st.markdown("#### Matrice de Corrélation")
             
             show_fig(charts.create_correlation_chart(profil['correlations']))
     
     # ====== TAB 3: PROFILING DÉTAILLÉ ======
     with tab3:
-        st.markdown("### 🔍 Profiling Détaillé par Colonne")
+        st.markdown("### Profiling Détaillé par Colonne")
         
         summary = utils_data.build_column_summary(df, profil)
 
@@ -461,7 +446,7 @@ if page == "📊 Dashboard":
     
     # ====== TAB: LIGNES À CORRIGER ======
     with tab_rows:
-        st.markdown("### 🔎 Lignes à corriger")
+        st.markdown("### Lignes à corriger")
         st.caption("Retrouvez et téléchargez les lignes concernées par un problème de qualité.")
 
         kind_label = st.radio(
@@ -503,7 +488,7 @@ if page == "📊 Dashboard":
 
     # ====== TAB 4: SYNTHÈSE IA ======
     with tab4:
-        st.markdown("### 🤖 Synthèse & Recommandations IA")
+        st.markdown("### Synthèse & Recommandations IA")
         
         if not openai_client:
             st.warning("""
@@ -513,7 +498,7 @@ if page == "📊 Dashboard":
             """)
             
             # Afficher quand même une synthèse basique
-            st.markdown("#### 📊 Résumé Rapide (Sans IA)")
+            st.markdown("#### Résumé Rapide (Sans IA)")
             st.info(f"""
             - **Dataset:** {profil['rows']:,} lignes × {profil['cols']} colonnes
             - **Score global:** {profil['global_score']}%
@@ -544,7 +529,7 @@ if page == "📊 Dashboard":
                     st.rerun()
 
             st.markdown("---")
-            st.markdown("#### 🧹 Script de nettoyage")
+            st.markdown("#### Script de nettoyage")
             st.caption("Généré à partir des problèmes détectés (noms de colonnes, sans valeurs).")
             if st.button("🧹 Générer un script de nettoyage", width="stretch"):
                 with st.spinner("🤖 Génération du script..."):
@@ -562,7 +547,7 @@ if page == "📊 Dashboard":
     
     # ====== TAB 5: TESTS SUGGÉRÉS ======
     with tab5:
-        st.markdown("### 🧪 Tests de Qualité Suggérés")
+        st.markdown("### Tests de Qualité Suggérés")
         
         if not openai_client:
             st.warning("⚠️ Fonctionnalité IA désactivée. Configurez OpenAI pour générer des tests.")
@@ -585,7 +570,7 @@ if page == "📊 Dashboard":
     
     # ====== TAB 6: EXPORT ======
     with tab6:
-        st.markdown("### 📄 Export du Rapport")
+        st.markdown("### Export du Rapport")
         
         st.info("""
         💡 **Options d'export disponibles:**
@@ -624,7 +609,7 @@ if page == "📊 Dashboard":
             )
 
         st.markdown("---")
-        st.markdown("#### 🧹 Nettoyage des données")
+        st.markdown("#### Nettoyage des données")
         opt1, opt2 = st.columns(2)
         with opt1:
             o_empty = st.checkbox("Supprimer les colonnes vides", value=True)
@@ -668,16 +653,12 @@ if page == "📊 Dashboard":
 
 # ==================== PAGE: CONTACT ====================
 
-elif page == "📞 Contact":
+elif page == "Contact":
     
-    st.title("📞 Contact")
+    st.title("Contact")
     
     st.markdown("""
-    <div style='background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                padding: 40px; 
-                border-radius: 16px; 
-                color: white; 
-                margin-bottom: 30px;'>
+    <div class='hero'>
         <h2 style='margin-bottom: 20px;'>👋 Parlons de vos données!</h2>
         <p style='font-size: 1.1rem; opacity: 0.95;'>
         Besoin d'aide avec votre projet data? D'une consultation sur la qualité de vos données?
@@ -704,7 +685,7 @@ elif page == "📞 Contact":
         """)
     
     with col_contact2:
-        st.markdown("### 💡 Domaines d'Expertise")
+        st.markdown("### Domaines d'Expertise")
         st.markdown("""
         - 🔍 Data Quality & Governance
         - 📊 Data Engineering
@@ -715,7 +696,7 @@ elif page == "📞 Contact":
     
     st.markdown("---")
     
-    st.markdown("### ✉️ Envoyer un message")
+    st.markdown("### Envoyer un message")
     st.markdown(
         "Écrivez-moi directement : "
         "[soumanoseydou@icloud.com](mailto:soumanoseydou@icloud.com?subject=Data%20Quality%20Platform)"
@@ -726,8 +707,8 @@ elif page == "📞 Contact":
 
 st.markdown("---")
 st.markdown("""
-<div style='text-align: center; color: #666; padding: 20px;'>
-    <p><strong>Data Quality Platform - PRO</strong> | Version 2.0</p>
+<div class='app-footer'>
+    <p><strong>Data Quality Platform</strong> · Version 2.1</p>
     <p>Développé avec ❤️ par Seydou SOUMANO | © 2026</p>
 </div>
 """, unsafe_allow_html=True)
