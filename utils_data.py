@@ -1,4 +1,3 @@
-# utils_data.py
 
 import pandas as pd
 import numpy as np
@@ -6,24 +5,23 @@ import io
 import warnings
 from typing import Dict, Optional, Tuple
 
+# Seuils heuristiques, à ajuster selon le domaine.
+DATE_PARSE_RATIO = 0.75         # part de valeurs parsables en date pour typer "datetime"
+CATEGORICAL_RATIO = 0.05        # nb de valeurs distinctes / nb de lignes sous lequel on parle de catégorie
+HIGH_CARDINALITY_RATIO = 0.95   # au-delà, la colonne ressemble à un identifiant
+IQR_FACTOR = 1.5                # facteur de la règle de Tukey pour les outliers
+
+# Poids du score global ; la somme vaut 1.
+SCORE_WEIGHTS = {"missing": 0.40, "duplicates": 0.25, "outliers": 0.20, "problematic_columns": 0.15}
+
 
 def detect_separator(uploaded_file_bytes: bytes) -> str:
-    """
-    Détecte automatiquement le séparateur d'un fichier CSV.
-    
-    Args:
-        uploaded_file_bytes: Bytes du fichier uploadé
-        
-    Returns:
-        str: Le séparateur détecté (par défaut ',')
-    """
+    """Détecte automatiquement le séparateur d'un fichier CSV."""
     sample = uploaded_file_bytes[:4096].decode(errors="ignore")
     separators = [';', ',', '\t', '|']
-    
-    # Compte le nombre d'occurrences de chaque séparateur
+
     counts = {sep: sample.count(sep) for sep in separators}
-    
-    # Retourne le séparateur le plus fréquent, ou ',' par défaut
+
     if max(counts.values()) > 0:
         return max(counts, key=counts.get)
     return ','
@@ -32,10 +30,10 @@ def detect_separator(uploaded_file_bytes: bytes) -> str:
 def load_dataframe(uploaded_file) -> Optional[pd.DataFrame]:
     """
     Charge un DataFrame depuis un fichier uploadé (CSV, Excel).
-    
+
     Args:
         uploaded_file: Fichier Streamlit uploadé
-        
+
     Returns:
         pd.DataFrame, ou None si aucun fichier.
 
@@ -44,7 +42,7 @@ def load_dataframe(uploaded_file) -> Optional[pd.DataFrame]:
     """
     if uploaded_file is None:
         return None
-        
+
     data = uploaded_file.getvalue()
     name = uploaded_file.name.lower()
 
@@ -63,33 +61,16 @@ def load_dataframe(uploaded_file) -> Optional[pd.DataFrame]:
 
 
 def safe_numeric(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Sélectionne uniquement les colonnes numériques du DataFrame.
-    
-    Args:
-        df: DataFrame source
-        
-    Returns:
-        pd.DataFrame contenant uniquement les colonnes numériques
-    """
+    """Sélectionne uniquement les colonnes numériques du DataFrame."""
     numeric = df.select_dtypes(include=[np.number])
     return numeric if numeric.shape[1] > 0 else pd.DataFrame()
 
 
 def detect_column_type(series: pd.Series) -> str:
-    """
-    Détecte le type sémantique d'une colonne.
-    
-    Args:
-        series: Série pandas à analyser
-        
-    Returns:
-        str: Type détecté ('empty', 'datetime', 'numeric', 'binary', 'categorical', 'text')
-    """
-    # Vérifier si la colonne est vide
+    """Détecte le type sémantique d'une colonne."""
     if series.isna().all():
         return "empty"
-    
+
     # Types déjà natifs : traités avant toute conversion
     if pd.api.types.is_bool_dtype(series):
         return "binary"
@@ -107,104 +88,79 @@ def detect_column_type(series: pd.Series) -> str:
             with warnings.catch_warnings():
                 warnings.simplefilter("ignore")
                 conv = pd.to_datetime(sample, errors="coerce")
-            if conv.notna().mean() > 0.75:
+            if conv.notna().mean() > DATE_PARSE_RATIO:
                 return "datetime"
         except (ValueError, TypeError, OverflowError):
             pass
-    
-    # Vérifier si c'est binaire (2 valeurs uniques)
+
     unique_count = series.nunique(dropna=True)
     if unique_count == 2:
         return "binary"
-    
-    # Vérifier si c'est catégoriel (moins de 5% de valeurs uniques)
-    if unique_count / max(1, len(series)) < 0.05:
+
+    if unique_count / max(1, len(series)) < CATEGORICAL_RATIO:
         return "categorical"
-    
+
     return "text"
 
 
 def calculate_outliers(series: pd.Series) -> Tuple[int, list]:
-    """
-    Calcule le nombre d'outliers et retourne leurs indices.
-    
-    Args:
-        series: Série numérique à analyser
-        
-    Returns:
-        Tuple (nombre d'outliers, liste des indices)
-    """
+    """Calcule le nombre d'outliers et retourne leurs indices."""
     series_clean = series.dropna()
     if len(series_clean) == 0:
         return 0, []
-    
+
     q1 = series_clean.quantile(0.25)
     q3 = series_clean.quantile(0.75)
     iqr = q3 - q1
-    
-    lower_bound = q1 - 1.5 * iqr
-    upper_bound = q3 + 1.5 * iqr
-    
+
+    lower_bound = q1 - IQR_FACTOR * iqr
+    upper_bound = q3 + IQR_FACTOR * iqr
+
     outliers_mask = (series_clean < lower_bound) | (series_clean > upper_bound)
     outlier_indices = series_clean[outliers_mask].index.tolist()
-    
+
     return int(outliers_mask.sum()), outlier_indices
 
 
 def profile_data_quality(df: pd.DataFrame) -> Dict:
-    """
-    Profile complet de la qualité des données d'un DataFrame.
-    
-    Args:
-        df: DataFrame à profiler
-        
-    Returns:
-        dict: Dictionnaire contenant toutes les métriques de qualité
-    """
+    """Profile complet de la qualité des données d'un DataFrame."""
     profil = {}
-    
-    # ===== INFORMATIONS GÉNÉRALES =====
+
     profil["rows"] = len(df)
     profil["cols"] = df.shape[1]
     profil["memory_usage"] = df.memory_usage(deep=True).sum() / 1024**2  # En MB
-    
-    # ===== VALEURS MANQUANTES =====
+
     profil["missing_count"] = df.isna().sum()
     profil["missing_pct"] = (df.isna().mean() * 100).round(2)
     profil["total_missing"] = int(df.isna().sum().sum())
     profil["missing_rate"] = round((profil["total_missing"] / max(1, df.shape[0] * df.shape[1])) * 100, 2)
-    
-    # ===== TYPES DE DONNÉES =====
+
     profil["dtypes"] = df.dtypes.astype(str)
     profil["column_types"] = {col: detect_column_type(df[col]) for col in df.columns}
-    
-    # Comptage par type
+
     type_counts = pd.Series(profil["column_types"]).value_counts().to_dict()
     profil["type_distribution"] = type_counts
-    
-    # ===== PROBLÈMES DE QUALITÉ =====
+
     profil["constant_columns"] = [
-        c for c in df.columns 
+        c for c in df.columns
         if df[c].nunique(dropna=True) <= 1
     ]
-    
+
     profil["empty_columns"] = [
-        c for c in df.columns 
+        c for c in df.columns
         if df[c].dropna().shape[0] == 0
     ]
-    
+
     profil["duplicate_rows"] = int(df.duplicated().sum())
     profil["duplicate_rate"] = round((profil["duplicate_rows"] / max(1, len(df))) * 100, 2)
-    
-    # ===== COLONNES À HAUTE CARDINALITÉ =====
+
     profil["high_cardinality_cols"] = [
         col for col in df.columns
-        if df[col].nunique() / max(1, len(df)) > 0.95 and profil["column_types"][col] not in ['numeric', 'datetime']
+        if df[col].nunique() / max(1, len(df)) > HIGH_CARDINALITY_RATIO and profil["column_types"][col] not in ['numeric', 'datetime']
     ]
-    
-    # ===== STATISTIQUES NUMÉRIQUES =====
+
     numeric = safe_numeric(df)
-    
+
     if numeric.empty:
         profil["numeric_stats"] = pd.DataFrame()
         profil["outliers"] = {}
@@ -212,83 +168,73 @@ def profile_data_quality(df: pd.DataFrame) -> Dict:
         profil["total_outliers"] = 0
     else:
         profil["numeric_stats"] = numeric.describe().T
-        
+
         outliers = {}
         outlier_indices = {}
         for col in numeric.columns:
             count, indices = calculate_outliers(df[col])
             outliers[col] = count
             outlier_indices[col] = indices
-            
+
         profil["outliers"] = outliers
         profil["outlier_indices"] = outlier_indices
         profil["total_outliers"] = sum(outliers.values())
-    
-    # ===== CORRÉLATIONS (pour colonnes numériques) =====
+
     if not numeric.empty and numeric.shape[1] > 1:
         profil["correlations"] = numeric.corr()
     else:
         profil["correlations"] = pd.DataFrame()
-    
-    # ===== SCORE GLOBAL DE QUALITÉ =====
-    # Calcul pondéré basé sur plusieurs critères
-    
-    # Score des valeurs manquantes (0-100, plus c'est élevé, mieux c'est)
+
+
     miss_score = max(0, 100 - profil["missing_rate"])
-    
-    # Score des doublons
+
     dup_score = max(0, 100 - profil["duplicate_rate"])
-    
-    # Score des outliers (normalisé)
+
     if profil["outliers"]:
-        # part de cellules numériques aberrantes (et non plus par ligne)
+        # rapporté au nombre de cellules numériques, pas au nombre de lignes
         n_numeric_cells = max(1, len(df) * len(profil["outliers"]))
         outlier_rate = (profil["total_outliers"] / n_numeric_cells) * 100
         out_score = max(0, 100 - outlier_rate)
     else:
         out_score = 100
-    
-    # Score des colonnes problématiques
+
     prob_cols = len(profil["constant_columns"]) + len(profil["empty_columns"])
     prob_score = max(0, 100 - (prob_cols / max(1, profil["cols"])) * 100)
-    
-    # Score global pondéré
+
     profil["global_score"] = round(
-        miss_score * 0.4 +      # 40% importance sur les valeurs manquantes
-        dup_score * 0.25 +      # 25% importance sur les doublons
-        out_score * 0.20 +      # 20% importance sur les outliers
-        prob_score * 0.15,      # 15% importance sur les colonnes problématiques
+        miss_score * SCORE_WEIGHTS["missing"]
+        + dup_score * SCORE_WEIGHTS["duplicates"]
+        + out_score * SCORE_WEIGHTS["outliers"]
+        + prob_score * SCORE_WEIGHTS["problematic_columns"],
         1
     )
-    
-    # Détails des scores par composante
+
     profil["score_details"] = {
         "missing_score": round(miss_score, 1),
         "duplicate_score": round(dup_score, 1),
         "outlier_score": round(out_score, 1),
         "problematic_columns_score": round(prob_score, 1)
     }
-    
-    # ===== RECOMMANDATIONS AUTOMATIQUES =====
+
     recommendations = []
-    
+
     if profil["missing_rate"] > 10:
-        recommendations.append("⚠️ Taux élevé de valeurs manquantes détecté (>10%)")
-    
+        recommendations.append("Taux élevé de valeurs manquantes détecté (>10%)")
+
     if profil["duplicate_rate"] > 5:
-        recommendations.append("⚠️ Taux élevé de doublons détecté (>5%)")
-    
+        recommendations.append("Taux élevé de doublons détecté (>5%)")
+
     if len(profil["constant_columns"]) > 0:
-        recommendations.append(f"ℹ️ {len(profil['constant_columns'])} colonne(s) constante(s) à supprimer")
-    
+        recommendations.append(f"ℹ {len(profil['constant_columns'])} colonne(s) constante(s) à supprimer")
+
     if len(profil["empty_columns"]) > 0:
-        recommendations.append(f"ℹ️ {len(profil['empty_columns'])} colonne(s) vide(s) à supprimer")
-    
+        recommendations.append(f"ℹ {len(profil['empty_columns'])} colonne(s) vide(s) à supprimer")
+
     if len(profil["high_cardinality_cols"]) > 0:
-        recommendations.append(f"ℹ️ {len(profil['high_cardinality_cols'])} colonne(s) à haute cardinalité détectée(s)")
-    
-    profil["recommendations"] = recommendations if recommendations else ["✅ Aucun problème majeur détecté"]
-    
+        recommendations.append(f"ℹ {len(profil['high_cardinality_cols'])} colonne(s) à haute cardinalité détectée(s)")
+
+    profil["recommendations"] = recommendations if recommendations else ["Aucun problème majeur détecté"]
+
     return profil
 
 
@@ -421,7 +367,7 @@ def build_column_summary(df: pd.DataFrame, profil: Dict) -> pd.DataFrame:
             alerts.append(f"{n_out} outlier(s)"); severity = max(severity, 1)
         if col in profil["high_cardinality_cols"]:
             alerts.append("haute cardinalité"); severity = max(severity, 1)
-        status = {3: "🔴 Critique", 2: "🟠 À surveiller", 1: "🟡 Mineur", 0: "🟢 OK"}[severity]
+        status = {3: "Critique", 2: "À surveiller", 1: "Mineur", 0: "OK"}[severity]
         rows.append({
             "Colonne": str(col), "Statut": status, "Type": ctype,
             "% manquant": missing, "Uniques": int(df[col].nunique(dropna=True)),
@@ -431,18 +377,9 @@ def build_column_summary(df: pd.DataFrame, profil: Dict) -> pd.DataFrame:
 
 
 def generate_quick_wins(profil: Dict) -> list:
-    """
-    Génère une liste de Quick Wins basée sur le profil.
-    
-    Args:
-        profil: Dictionnaire du profil de qualité
-        
-    Returns:
-        list: Liste de quick wins avec actions concrètes
-    """
+    """Génère une liste de Quick Wins basée sur le profil."""
     quick_wins = []
-    
-    # Quick Win 1: Colonnes vides
+
     if profil["empty_columns"]:
         quick_wins.append({
             "priority": "Haute",
@@ -451,8 +388,7 @@ def generate_quick_wins(profil: Dict) -> list:
             "impact": "Réduction immédiate de la taille du dataset",
             "code": f"df = df.drop(columns={profil['empty_columns']})"
         })
-    
-    # Quick Win 2: Colonnes constantes
+
     if profil["constant_columns"]:
         quick_wins.append({
             "priority": "Haute",
@@ -461,8 +397,7 @@ def generate_quick_wins(profil: Dict) -> list:
             "impact": "Amélioration de la pertinence des données",
             "code": f"df = df.drop(columns={profil['constant_columns']})"
         })
-    
-    # Quick Win 3: Doublons
+
     if profil["duplicate_rows"] > 0:
         quick_wins.append({
             "priority": "Haute",
@@ -471,8 +406,7 @@ def generate_quick_wins(profil: Dict) -> list:
             "impact": f"Réduction de {profil['duplicate_rate']}% du dataset",
             "code": "df = df.drop_duplicates()"
         })
-    
-    # Quick Win 4: Valeurs manquantes critiques
+
     high_missing = profil["missing_pct"][profil["missing_pct"] > 50]
     if not high_missing.empty:
         quick_wins.append({
@@ -480,10 +414,9 @@ def generate_quick_wins(profil: Dict) -> list:
             "action": "Traiter les colonnes avec >50% de valeurs manquantes",
             "columns": high_missing.index.tolist(),
             "impact": "Amélioration de la complétude des données",
-            "code": f"# Options: imputation, suppression ou collecte de nouvelles données"
+            "code": "# Options: imputation, suppression ou collecte de nouvelles données"
         })
-    
-    # Quick Win 5: Normalisation des types
+
     if "text" in profil.get("type_distribution", {}):
         quick_wins.append({
             "priority": "Moyenne",
@@ -492,5 +425,5 @@ def generate_quick_wins(profil: Dict) -> list:
             "impact": "Amélioration de la cohérence des données",
             "code": "df['col'] = df['col'].str.strip().str.lower()"
         })
-    
+
     return quick_wins[:5]  # Limiter à 5 quick wins

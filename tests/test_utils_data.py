@@ -1,4 +1,3 @@
-import io
 
 import numpy as np
 import pandas as pd
@@ -71,7 +70,7 @@ def test_pdf_and_html_reports_escape_and_build():
     html = utils_pdf.generate_pdf_html("<script>alert(1)</script>", profil, df)
     assert "<script>alert(1)</script>" not in html
     assert "<b>x</b>" not in html
-    assert utils_pdf.generate_pdf_bytes("## Synthèse ⚠️ **ok**", profil).startswith(b"%PDF")
+    assert utils_pdf.generate_pdf_bytes("## Synthèse **ok**", profil).startswith(b"%PDF")
 
 
 def _sample_profile():
@@ -96,9 +95,9 @@ def test_top_issues_sorted_by_severity():
 def test_column_summary_status():
     df, profil = _sample_profile()
     summary = utils_data.build_column_summary(df, profil).set_index("Colonne")
-    assert summary.loc["vide", "Statut"].startswith("🔴")
-    assert summary.loc["const", "Statut"].startswith("🟠")
-    assert summary.loc["id", "Statut"].startswith("🟢")
+    assert summary.loc["vide", "Statut"] == "Critique"
+    assert summary.loc["const", "Statut"] == "À surveiller"
+    assert summary.loc["id", "Statut"] == "OK"
     assert "outlier" in summary.loc["val", "Alertes"]
 
 
